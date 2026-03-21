@@ -1,4 +1,4 @@
-# app/__init__.py - Updated for local development with memory storage rate limiting
+# app/__init__.py - Updated for local development with memory storage rate limiting and fixed CORS
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
@@ -53,7 +53,7 @@ def create_app(config_name='development'):  # Changed default to development for
     
     print("🔵 STEP 6: Configuring CORS...")
     
-    # CORS CONFIGURATION - FIXED FOR LOCAL DEVELOPMENT
+    # CORS CONFIGURATION - FIXED TO PREVENT DUPLICATE HEADERS
     if config_name == 'production':
         allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
@@ -69,39 +69,27 @@ def create_app(config_name='development'):  # Changed default to development for
         ]
         print(f"🔧 Development CORS origins: {allowed_origins}")
 
-    # Configure CORS with more permissive settings for development
+    # Configure CORS - This is the only place that should add CORS headers
     CORS(app, 
          origins=allowed_origins,
          supports_credentials=True,
          allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
          expose_headers=["Content-Type", "Authorization"],
-         max_age=3600)  # Cache preflight requests for 1 hour
+         max_age=3600,
+         automatic_options=True,  # Let Flask-CORS handle OPTIONS automatically
+         vary=True)  # Add Vary header for proper caching
     
-    # Add OPTIONS handler for all routes to ensure CORS headers are sent
+    # REMOVED the manual after_request handler that was adding duplicate CORS headers
+    # Now only Flask-CORS adds headers, preventing duplicates
+    
+    # Simple after_request for non-CORS headers only
     @app.after_request
-    def after_request(response):
-        origin = request.headers.get('Origin')
-        if origin and origin in allowed_origins:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
+    def add_security_headers(response):
+        # Only add security headers, NOT CORS headers (they're already added by Flask-CORS)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
         return response
-    
-    # Explicitly handle OPTIONS requests for all routes
-    @app.route('/<path:path>', methods=['OPTIONS'])
-    def handle_options(path):
-        """Handle preflight OPTIONS requests"""
-        response = make_response()
-        origin = request.headers.get('Origin')
-        if origin and origin in allowed_origins:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
-            response.headers.add('Access-Control-Max-Age', '3600')
-        return response, 200
     
     mail.init_app(app)
     
@@ -350,15 +338,8 @@ def create_app(config_name='development'):  # Changed default to development for
     @app.route('/health', methods=['GET', 'OPTIONS'])
     def health_check():
         if request.method == 'OPTIONS':
-            # Handle preflight for health check
-            response = make_response()
-            origin = request.headers.get('Origin')
-            if origin and origin in allowed_origins:
-                response.headers.add('Access-Control-Allow-Origin', origin)
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-                response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response, 200
+            # OPTIONS requests are now handled automatically by Flask-CORS
+            return '', 200
             
         db_status = 'healthy'
         try:
@@ -381,19 +362,26 @@ def create_app(config_name='development'):  # Changed default to development for
     def test_endpoint():
         """Simple test endpoint"""
         if request.method == 'OPTIONS':
-            response = make_response()
-            origin = request.headers.get('Origin')
-            if origin and origin in allowed_origins:
-                response.headers.add('Access-Control-Allow-Origin', origin)
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-                response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response, 200
+            # OPTIONS requests are now handled automatically by Flask-CORS
+            return '', 200
         
         return jsonify({
             'message': 'Backend is working',
             'status': 'ok',
             'timestamp': datetime.utcnow().isoformat()
+        }), 200
+    
+    @app.route('/debug/cors', methods=['GET', 'OPTIONS'])
+    def debug_cors():
+        """Debug endpoint to check CORS headers"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        return jsonify({
+            'message': 'CORS debug endpoint',
+            'request_origin': request.headers.get('Origin'),
+            'request_headers': dict(request.headers),
+            'allowed_origins': allowed_origins
         }), 200
     
     # Error handlers
