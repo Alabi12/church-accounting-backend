@@ -1,5 +1,5 @@
-# app/__init__.py - Production-ready with PostgreSQL support
-from flask import Flask, jsonify, request
+# app/__init__.py - Production-ready with PostgreSQL support and fixed CORS
+from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
 import logging
@@ -53,7 +53,7 @@ def create_app(config_name='production'):
     
     print("🔵 STEP 6: Configuring CORS...")
     
-    # CORS CONFIGURATION
+    # CORS CONFIGURATION - IMPROVED FOR PRODUCTION
     if config_name == 'production':
         allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
@@ -61,12 +61,39 @@ def create_app(config_name='production'):
         allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
         print(f"🔧 Development CORS origins: {allowed_origins}")
 
+    # Configure CORS with more permissive settings for production
     CORS(app, 
          origins=allowed_origins,
          supports_credentials=True,
-         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+         allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-         expose_headers=["Content-Type", "Authorization"])
+         expose_headers=["Content-Type", "Authorization"],
+         max_age=3600)  # Cache preflight requests for 1 hour
+    
+    # Add OPTIONS handler for all routes to ensure CORS headers are sent
+    @app.after_request
+    def after_request(response):
+        origin = request.headers.get('Origin')
+        if origin and origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+        return response
+    
+    # Explicitly handle OPTIONS requests for all routes
+    @app.route('/<path:path>', methods=['OPTIONS'])
+    def handle_options(path):
+        """Handle preflight OPTIONS requests"""
+        response = make_response()
+        origin = request.headers.get('Origin')
+        if origin and origin in allowed_origins:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            response.headers.add('Access-Control-Max-Age', '3600')
+        return response, 200
     
     mail.init_app(app)
     
@@ -300,9 +327,23 @@ def create_app(config_name='production'):
     def log_request_info():
         if config_name == 'development':
             logger.info(f"📥 {request.method} {request.path}")
+        elif request.method == 'OPTIONS':
+            # Log OPTIONS requests in production for debugging
+            print(f"📥 OPTIONS request to {request.path} from {request.headers.get('Origin')}")
     
-    @app.route('/health', methods=['GET'])
+    @app.route('/health', methods=['GET', 'OPTIONS'])
     def health_check():
+        if request.method == 'OPTIONS':
+            # Handle preflight for health check
+            response = make_response()
+            origin = request.headers.get('Origin')
+            if origin and origin in allowed_origins:
+                response.headers.add('Access-Control-Allow-Origin', origin)
+                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+                response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response, 200
+            
         db_status = 'healthy'
         try:
             db.session.execute('SELECT 1').scalar()
@@ -314,6 +355,7 @@ def create_app(config_name='production'):
             'environment': config_name,
             'database': db_status,
             'cors_enabled': True,
+            'cors_origins': allowed_origins,
             'socketio_enabled': False,
             'timestamp': datetime.utcnow().isoformat()
         }), 200
