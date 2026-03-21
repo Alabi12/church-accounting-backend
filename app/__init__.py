@@ -1,4 +1,4 @@
-# app/__init__.py - Updated for local development with memory storage rate limiting and fixed CORS
+# app/__init__.py - Fixed CORS configuration
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
@@ -15,7 +15,7 @@ from flask import g
 # Import socketio from helper (handles production gracefully)
 from app.socketio_helper import socketio, emit, join_room, leave_room
 
-def create_app(config_name='development'):  # Changed default to development for local testing
+def create_app(config_name='development'):
     print(f"🔵 STEP 1: create_app started with config: {config_name}")
     
     app = Flask(__name__)
@@ -53,7 +53,7 @@ def create_app(config_name='development'):  # Changed default to development for
     
     print("🔵 STEP 6: Configuring CORS...")
     
-    # CORS CONFIGURATION - FIXED TO PREVENT DUPLICATE HEADERS
+    # CORS CONFIGURATION - Let Flask-CORS handle all CORS including OPTIONS
     if config_name == 'production':
         allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
@@ -69,19 +69,14 @@ def create_app(config_name='development'):  # Changed default to development for
         ]
         print(f"🔧 Development CORS origins: {allowed_origins}")
 
-    # Configure CORS - This is the only place that should add CORS headers
+    # Configure CORS - This handles all CORS including OPTIONS preflight requests
     CORS(app, 
          origins=allowed_origins,
          supports_credentials=True,
          allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
          expose_headers=["Content-Type", "Authorization"],
-         max_age=3600,
-         automatic_options=True,  # Let Flask-CORS handle OPTIONS automatically
-         vary=True)  # Add Vary header for proper caching
-    
-    # REMOVED the manual after_request handler that was adding duplicate CORS headers
-    # Now only Flask-CORS adds headers, preventing duplicates
+         max_age=3600)  # Removed automatic_options=True - let it handle automatically
     
     # Simple after_request for non-CORS headers only
     @app.after_request
@@ -97,50 +92,41 @@ def create_app(config_name='development'):  # Changed default to development for
     
     # Rate limiting setup with memory storage (no Redis required)
     try:
-        # Initialize rate limiter with memory storage
         limiter = Limiter(
             get_remote_address,
             app=app,
             default_limits=[
-                "200 per day",      # 200 requests per day per IP
-                "50 per hour",      # 50 requests per hour per IP
-                "10 per minute"     # 10 requests per minute per IP
+                "200 per day",
+                "50 per hour",
+                "10 per minute"
             ],
-            storage_uri="memory://",  # Use in-memory storage
-            strategy="fixed-window",  # Fixed window rate limiting strategy
-            headers_enabled=True,     # Add rate limit headers to responses
-            auto_check=True,          # Automatically check limits on every request
+            storage_uri="memory://",
+            strategy="fixed-window",
+            headers_enabled=True,
+            auto_check=True,
         )
         
-        # Enable or disable based on environment
         if config_name == 'production':
             limiter.enabled = True
             print("✅ Production rate limiting enabled with memory storage")
-            print("   Limits: 200/day, 50/hour, 10/minute per IP")
         else:
             limiter.enabled = False
             print("⚠️ Rate limiting disabled for development")
             
     except Exception as e:
         print(f"⚠️ Rate limiting setup failed: {e}")
-        print("⚠️ Continuing without rate limiting")
-        # Create a dummy limiter that does nothing
         class DummyLimiter:
             def __init__(self):
                 self.enabled = False
-                
             def limit(self, *args, **kwargs):
                 return lambda f: f
-                
             def init_app(self, app):
                 pass
-                
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
         
         limiter = DummyLimiter()
     
-    # Store limiter in app for use in routes
     app.limiter = limiter
     
     print("🔵 STEP 8: Entering app context...")
@@ -158,18 +144,15 @@ def create_app(config_name='development'):  # Changed default to development for
         print("🔵 STEP 11: Checking/Creating database tables...")
         
         try:
-            # Check if tables already exist
             inspector = inspect(db.engine)
             existing_tables = inspector.get_table_names()
             
             if not existing_tables:
-                # Only create tables if none exist
                 db.create_all()
                 print("🔵 STEP 12: Database tables created")
             else:
                 print(f"🔵 STEP 12: Database tables already exist ({len(existing_tables)} tables found)")
                 
-                # Run any pending migrations if needed
                 try:
                     from flask_migrate import upgrade
                     upgrade()
@@ -330,17 +313,13 @@ def create_app(config_name='development'):  # Changed default to development for
     @app.before_request
     def log_request_info():
         if config_name == 'development':
+            # Log all requests for debugging
             print(f"📥 {request.method} {request.path} from {request.headers.get('Origin')}")
-        elif request.method == 'OPTIONS':
-            # Log OPTIONS requests in production for debugging
-            print(f"📥 OPTIONS request to {request.path} from {request.headers.get('Origin')}")
+            if request.method == 'OPTIONS':
+                print(f"   🔄 Preflight request received")
     
-    @app.route('/health', methods=['GET', 'OPTIONS'])
+    @app.route('/health', methods=['GET'])
     def health_check():
-        if request.method == 'OPTIONS':
-            # OPTIONS requests are now handled automatically by Flask-CORS
-            return '', 200
-            
         db_status = 'healthy'
         try:
             db.session.execute('SELECT 1').scalar()
@@ -358,25 +337,18 @@ def create_app(config_name='development'):  # Changed default to development for
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     
-    @app.route('/api/test', methods=['GET', 'OPTIONS'])
+    @app.route('/api/test', methods=['GET'])
     def test_endpoint():
         """Simple test endpoint"""
-        if request.method == 'OPTIONS':
-            # OPTIONS requests are now handled automatically by Flask-CORS
-            return '', 200
-        
         return jsonify({
             'message': 'Backend is working',
             'status': 'ok',
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     
-    @app.route('/debug/cors', methods=['GET', 'OPTIONS'])
+    @app.route('/debug/cors', methods=['GET'])
     def debug_cors():
         """Debug endpoint to check CORS headers"""
-        if request.method == 'OPTIONS':
-            return '', 200
-        
         return jsonify({
             'message': 'CORS debug endpoint',
             'request_origin': request.headers.get('Origin'),
