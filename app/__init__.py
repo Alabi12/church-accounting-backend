@@ -1,11 +1,11 @@
-# app/__init__.py - Production-ready with PostgreSQL support and fixed CORS
+# app/__init__.py - Updated for local development with memory storage rate limiting
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
 import logging
 import traceback
 from datetime import datetime, timedelta
-from app.extensions import db, jwt, mail, limiter, logger, migrate
+from app.extensions import db, jwt, mail, logger, migrate
 from app.config import config_by_name
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -15,7 +15,7 @@ from flask import g
 # Import socketio from helper (handles production gracefully)
 from app.socketio_helper import socketio, emit, join_room, leave_room
 
-def create_app(config_name='production'):
+def create_app(config_name='development'):  # Changed default to development for local testing
     print(f"🔵 STEP 1: create_app started with config: {config_name}")
     
     app = Flask(__name__)
@@ -53,15 +53,23 @@ def create_app(config_name='production'):
     
     print("🔵 STEP 6: Configuring CORS...")
     
-    # CORS CONFIGURATION - IMPROVED FOR PRODUCTION
+    # CORS CONFIGURATION - FIXED FOR LOCAL DEVELOPMENT
     if config_name == 'production':
         allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
     else:
-        allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+        # Allow all local development origins
+        allowed_origins = [
+            "http://localhost:3000", 
+            "http://127.0.0.1:3000",
+            "http://localhost:5000",
+            "http://127.0.0.1:5000",
+            "http://localhost:5173",  # Vite default
+            "http://127.0.0.1:5173"
+        ]
         print(f"🔧 Development CORS origins: {allowed_origins}")
 
-    # Configure CORS with more permissive settings for production
+    # Configure CORS with more permissive settings for development
     CORS(app, 
          origins=allowed_origins,
          supports_credentials=True,
@@ -97,47 +105,55 @@ def create_app(config_name='production'):
     
     mail.init_app(app)
     
-    print("🔵 STEP 7: Setting up limiter...")
+    print("🔵 STEP 7: Setting up rate limiter with memory storage...")
     
-    # Rate limiting
-    if config_name == 'production':
-        try:
-            redis_url = os.environ.get('REDIS_URL', None)
-            if redis_url:
-                limiter = Limiter(
-                    get_remote_address,
-                    app=app,
-                    default_limits=["200 per day", "50 per hour"],
-                    storage_uri=redis_url,
-                )
-                print("✅ Production rate limiting enabled with Redis")
-            else:
-                limiter = Limiter(
-                    get_remote_address,
-                    app=app,
-                    default_limits=["200 per day", "50 per hour"],
-                    storage_uri="memory://",
-                )
-                limiter.enabled = True
-                print("✅ Production rate limiting enabled with memory storage")
-        except Exception as e:
-            print(f"⚠️ Rate limiting setup failed: {e}")
-            limiter = Limiter(
-                get_remote_address,
-                app=app,
-                default_limits=["200 per day", "50 per hour"],
-                storage_uri="memory://",
-            )
-            limiter.enabled = True
-    else:
+    # Rate limiting setup with memory storage (no Redis required)
+    try:
+        # Initialize rate limiter with memory storage
         limiter = Limiter(
             get_remote_address,
             app=app,
-            default_limits=["200 per day", "50 per hour"],
-            storage_uri="memory://",
+            default_limits=[
+                "200 per day",      # 200 requests per day per IP
+                "50 per hour",      # 50 requests per hour per IP
+                "10 per minute"     # 10 requests per minute per IP
+            ],
+            storage_uri="memory://",  # Use in-memory storage
+            strategy="fixed-window",  # Fixed window rate limiting strategy
+            headers_enabled=True,     # Add rate limit headers to responses
+            auto_check=True,          # Automatically check limits on every request
         )
-        limiter.enabled = False
-        print("⚠️ Rate limiting disabled for development")
+        
+        # Enable or disable based on environment
+        if config_name == 'production':
+            limiter.enabled = True
+            print("✅ Production rate limiting enabled with memory storage")
+            print("   Limits: 200/day, 50/hour, 10/minute per IP")
+        else:
+            limiter.enabled = False
+            print("⚠️ Rate limiting disabled for development")
+            
+    except Exception as e:
+        print(f"⚠️ Rate limiting setup failed: {e}")
+        print("⚠️ Continuing without rate limiting")
+        # Create a dummy limiter that does nothing
+        class DummyLimiter:
+            def __init__(self):
+                self.enabled = False
+                
+            def limit(self, *args, **kwargs):
+                return lambda f: f
+                
+            def init_app(self, app):
+                pass
+                
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+        
+        limiter = DummyLimiter()
+    
+    # Store limiter in app for use in routes
+    app.limiter = limiter
     
     print("🔵 STEP 8: Entering app context...")
     
@@ -326,7 +342,7 @@ def create_app(config_name='production'):
     @app.before_request
     def log_request_info():
         if config_name == 'development':
-            logger.info(f"📥 {request.method} {request.path}")
+            print(f"📥 {request.method} {request.path} from {request.headers.get('Origin')}")
         elif request.method == 'OPTIONS':
             # Log OPTIONS requests in production for debugging
             print(f"📥 OPTIONS request to {request.path} from {request.headers.get('Origin')}")
@@ -356,7 +372,27 @@ def create_app(config_name='production'):
             'database': db_status,
             'cors_enabled': True,
             'cors_origins': allowed_origins,
+            'rate_limiting_enabled': limiter.enabled if hasattr(limiter, 'enabled') else False,
             'socketio_enabled': False,
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
+    
+    @app.route('/api/test', methods=['GET', 'OPTIONS'])
+    def test_endpoint():
+        """Simple test endpoint"""
+        if request.method == 'OPTIONS':
+            response = make_response()
+            origin = request.headers.get('Origin')
+            if origin and origin in allowed_origins:
+                response.headers.add('Access-Control-Allow-Origin', origin)
+                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
+                response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response, 200
+        
+        return jsonify({
+            'message': 'Backend is working',
+            'status': 'ok',
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     
