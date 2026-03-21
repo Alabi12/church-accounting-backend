@@ -1,4 +1,4 @@
-# app/routes/payroll_routes.py
+# app/routes/payroll_routes.py - Complete with all endpoints
 
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -21,25 +21,11 @@ payroll_bp = Blueprint('payroll', __name__)
 
 # ==================== HELPER FUNCTIONS ====================
 
-# In payroll_routes.py, after creating the blueprint
-
-@payroll_bp.before_request
-def handle_options_request():
-    if request.method == 'OPTIONS':
-        response = jsonify({'message': 'OK'})
-        response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        return response, 200
-    
 def get_current_user():
     """Get current user from JWT token or g"""
-    # First check if user is already in g
     if hasattr(g, 'current_user') and g.current_user:
         return g.current_user
     
-    # Try to get from JWT
     try:
         user_id = get_jwt_identity()
         if user_id:
@@ -53,64 +39,20 @@ def get_current_user():
     return None
 
 
-@payroll_bp.route('/payroll/runs', methods=['GET', 'OPTIONS'])
-@jwt_required()
-def get_payroll_runs():
-    """Get all payroll runs"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        church_id = ensure_user_church()
-        
-        # Pagination
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 10, type=int)
-        
-        # Build query
-        query = PayrollRun.query.filter_by(church_id=church_id)
-        
-        # Apply filters
-        status = request.args.get('status')
-        if status and status != 'all':
-            query = query.filter_by(status=status)
-        
-        # Order by most recent first
-        query = query.order_by(PayrollRun.created_at.desc())
-        
-        # Paginate
-        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
-        
-        return jsonify({
-            'runs': [run.to_dict() for run in paginated.items],
-            'total': paginated.total,
-            'pages': paginated.pages,
-            'current_page': paginated.page
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error fetching payroll runs: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    
-    
 def ensure_user_church(user=None):
     """
     Ensure user has a church_id, using current user if none provided.
     Returns church_id or raises ValueError.
     """
-    # If no user provided, try to get current user
     if user is None:
         user = get_current_user()
     
-    # If still no user, try default church
     if not user:
         default_church = Church.query.first()
         if default_church:
             return default_church.id
         raise ValueError("No authenticated user and no default church found")
     
-    # If user has no church_id, assign default
     if not user.church_id:
         default_church = Church.query.first()
         if default_church:
@@ -127,19 +69,9 @@ def ensure_user_church(user=None):
 def calculate_monthly_paye(gross_monthly_income):
     """
     Calculate PAYE tax based on 2025 Ghana tax rates - MONTHLY
-    
-    Tax Brackets (Monthly):
-    1. First 490 @ 0% = 0.00
-    2. Next 110 @ 5% = 5.50
-    3. Next 130 @ 10% = 13.00
-    4. Next 3,166.67 @ 17.5% = 554.17
-    5. Next 16,000 @ 25% = 4,000.00
-    6. Next 30,520 @ 30% = 9,156.00
-    7. Above 50,416.67 @ 35%
     """
     monthly_income = float(gross_monthly_income)
     
-    # Define tax brackets (monthly)
     brackets = [
         {'limit': 490, 'rate': 0, 'cumulative_tax': 0},
         {'limit': 110, 'rate': 5, 'cumulative_tax': 5.50},
@@ -150,13 +82,11 @@ def calculate_monthly_paye(gross_monthly_income):
         {'limit': float('inf'), 'rate': 35, 'cumulative_tax': float('inf')}
     ]
     
-    # Calculate cumulative limits
     cumulative_limit = 0
     for i, bracket in enumerate(brackets):
         cumulative_limit += bracket['limit'] if i < len(brackets) - 1 else 0
         brackets[i]['cumulative_limit'] = cumulative_limit
     
-    # Calculate tax
     remaining_income = monthly_income
     total_tax = 0
     bracket_details = []
@@ -165,13 +95,13 @@ def calculate_monthly_paye(gross_monthly_income):
         if remaining_income <= 0:
             break
             
-        if i == 0:  # First bracket (tax-free)
+        if i == 0:
             taxable_amount = min(remaining_income, bracket['limit'])
             tax = 0
-        elif i == len(brackets) - 1:  # Last bracket (above all limits)
+        elif i == len(brackets) - 1:
             taxable_amount = remaining_income
             tax = taxable_amount * (bracket['rate'] / 100)
-        else:  # Middle brackets
+        else:
             taxable_amount = min(remaining_income, bracket['limit'])
             tax = taxable_amount * (bracket['rate'] / 100)
         
@@ -210,20 +140,15 @@ def calculate_withholding_tax(payment_amount, rate=5):
 
 # ==================== EMPLOYEE MANAGEMENT ====================
 
-@payroll_bp.route('/employees', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/employees', methods=['GET'])
 @jwt_required()
 def get_employees():
     """Get all employees"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
-        church_id = ensure_user_church()  # No parameter needed now
+        church_id = ensure_user_church()
         
-        # Build query
         query = Employee.query.filter_by(church_id=church_id)
         
-        # Apply filters
         status = request.args.get('status')
         if status:
             query = query.filter_by(status=status)
@@ -247,7 +172,6 @@ def get_employees():
                 )
             )
         
-        # Pagination
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 20, type=int)
         
@@ -266,13 +190,10 @@ def get_employees():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/employees', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/employees', methods=['POST'])
 @jwt_required()
 def create_employee():
     """Create a new employee"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -282,13 +203,11 @@ def create_employee():
             
         data = request.get_json()
         
-        # Validate required fields
         required_fields = ['first_name', 'last_name', 'employment_type', 'pay_rate']
         for field in required_fields:
             if field not in data:
                 return jsonify({'error': f'Missing required field: {field}'}), 400
         
-        # Generate employee code
         last_employee = Employee.query.filter_by(church_id=church_id).order_by(Employee.id.desc()).first()
         if last_employee and last_employee.employee_code:
             try:
@@ -301,12 +220,10 @@ def create_employee():
         
         employee_code = f"EMP-{datetime.now().year}-{new_num:04d}"
         
-        # Parse hire date
         hire_date = None
         if data.get('hire_date'):
             hire_date = datetime.fromisoformat(data['hire_date'].replace('Z', '+00:00'))
         
-        # Create employee
         employee = Employee(
             church_id=church_id,
             employee_code=employee_code,
@@ -341,7 +258,6 @@ def create_employee():
         db.session.add(employee)
         db.session.commit()
         
-        # Log audit
         audit_log = AuditLog(
             user_id=current_user.id,
             action='CREATE_EMPLOYEE',
@@ -366,13 +282,10 @@ def create_employee():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/employees/<int:employee_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@payroll_bp.route('/employees/<int:employee_id>', methods=['GET', 'PUT', 'DELETE'])
 @jwt_required()
 def manage_employee(employee_id):
     """Get, update, or delete an employee"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -386,7 +299,6 @@ def manage_employee(employee_id):
             return jsonify({'error': 'Employee not found'}), 404
         
         if request.method == 'GET':
-            # Get employee with deductions
             deductions = EmployeeDeduction.query.filter_by(
                 employee_id=employee.id,
                 is_active=True
@@ -400,7 +312,6 @@ def manage_employee(employee_id):
         elif request.method == 'PUT':
             data = request.get_json()
             
-            # Update fields
             updatable_fields = [
                 'first_name', 'last_name', 'middle_name', 'email', 'phone',
                 'address', 'city', 'state', 'postal_code', 'national_id', 'tax_id',
@@ -421,7 +332,6 @@ def manage_employee(employee_id):
             
             db.session.commit()
             
-            # Log audit
             audit_log = AuditLog(
                 user_id=current_user.id,
                 action='UPDATE_EMPLOYEE',
@@ -439,7 +349,6 @@ def manage_employee(employee_id):
             }), 200
             
         elif request.method == 'DELETE':
-            # Soft delete - just mark as inactive
             employee.status = 'inactive'
             employee.updated_by = current_user.id
             employee.updated_at = datetime.utcnow()
@@ -456,13 +365,75 @@ def manage_employee(employee_id):
 
 # ==================== PAYROLL PROCESSING ====================
 
-@payroll_bp.route('/payroll/calculate', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/payroll/runs', methods=['GET'])
+@jwt_required()
+def get_payroll_runs():
+    """Get all payroll runs"""
+    try:
+        church_id = ensure_user_church()
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        
+        query = PayrollRun.query.filter_by(church_id=church_id)
+        
+        status = request.args.get('status')
+        if status and status != 'all':
+            query = query.filter_by(status=status)
+        
+        query = query.order_by(PayrollRun.created_at.desc())
+        
+        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        return jsonify({
+            'runs': [run.to_dict() for run in paginated.items],
+            'total': paginated.total,
+            'pages': paginated.pages,
+            'current_page': paginated.page
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching payroll runs: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/payroll/<int:run_id>', methods=['GET'])
+@jwt_required()
+def get_payroll_run(run_id):
+    """Get a specific payroll run with its items"""
+    try:
+        church_id = ensure_user_church()
+        
+        payroll_run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        # Get items with employee details
+        items = payroll_run.items.all()
+        
+        payroll_data = payroll_run.to_dict()
+        payroll_data['items'] = []
+        
+        for item in items:
+            item_dict = item.to_dict()
+            if item.employee:
+                item_dict['employee'] = item.employee.to_dict()
+            payroll_data['items'].append(item_dict)
+        
+        return jsonify(payroll_data), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching payroll run: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/payroll/calculate', methods=['POST'])
 @jwt_required()
 def calculate_payroll():
     """Calculate payroll for a period"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         data = request.get_json()
@@ -471,7 +442,6 @@ def calculate_payroll():
         period_end = datetime.fromisoformat(data['period_end'].replace('Z', '+00:00'))
         payment_date = datetime.fromisoformat(data.get('payment_date', data['period_end']).replace('Z', '+00:00'))
         
-        # Get all active employees
         employees = Employee.query.filter_by(
             church_id=church_id,
             status='active'
@@ -486,7 +456,6 @@ def calculate_payroll():
         total_net = 0
         
         for employee in employees:
-            # Calculate monthly pay based on pay frequency
             if employee.pay_frequency == 'monthly':
                 monthly_gross = float(employee.pay_rate)
             elif employee.pay_frequency == 'bi-weekly':
@@ -496,41 +465,30 @@ def calculate_payroll():
             else:
                 monthly_gross = float(employee.pay_rate)
             
-            # Calculate for the period (prorate if period is not a full month)
             days_in_period = (period_end - period_start).days + 1
             days_in_month = 30
             period_factor = days_in_period / days_in_month
             
             period_gross = monthly_gross * period_factor
             
-            # Initialize deductions
             ssnit_amount = 0
             provident_fund_amount = 0
             paye_amount = 0
             withholding_amount = 0
             
-            # Calculate statutory deductions based on employment type
             if employee.employment_type in ['full-time', 'part-time']:
-                # SSNIT (5.5% for employee)
                 ssnit_amount = calculate_ssnit(period_gross)
-                
-                # PAYE Tax
                 paye_result = calculate_monthly_paye(period_gross)
                 paye_amount = paye_result['total_tax']
-                
-                # Provident Fund (optional, up to 16.5%)
                 provident_fund_amount = calculate_provident_fund(period_gross, 16.5)
                 
             elif employee.employment_type == 'contractor':
-                # Contractors may have different tax treatment
                 paye_result = calculate_monthly_paye(period_gross)
                 paye_amount = paye_result['total_tax']
                 
             elif employee.employment_type == 'casual':
-                # Casual workers - Withholding Tax (5%)
                 withholding_amount = calculate_withholding_tax(period_gross)
             
-            # Get employee-specific voluntary deductions
             employee_deductions = EmployeeDeduction.query.filter_by(
                 employee_id=employee.id,
                 is_active=True
@@ -552,11 +510,9 @@ def calculate_payroll():
                     'amount': round(amount, 2)
                 })
             
-            # Calculate net pay
             total_deductions = ssnit_amount + provident_fund_amount + paye_amount + withholding_amount + other_deductions
             net_pay = period_gross - total_deductions
             
-            # Create payroll item
             item = {
                 'employee_id': employee.id,
                 'employee_name': employee.full_name(),
@@ -606,13 +562,10 @@ def calculate_payroll():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/payroll/process', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/payroll/process', methods=['POST'])
 @jwt_required()
 def process_payroll():
     """Process and save payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -622,7 +575,6 @@ def process_payroll():
             
         data = request.get_json()
         
-        # Generate run number
         year = datetime.now().year
         month = datetime.now().month
         run_count = PayrollRun.query.filter(
@@ -635,7 +587,6 @@ def process_payroll():
         period_end = datetime.fromisoformat(data['period_end'].replace('Z', '+00:00'))
         payment_date = datetime.fromisoformat(data['payment_date'].replace('Z', '+00:00'))
         
-        # Create payroll run
         payroll_run = PayrollRun(
             church_id=church_id,
             run_number=run_number,
@@ -653,7 +604,6 @@ def process_payroll():
         db.session.add(payroll_run)
         db.session.flush()
         
-        # Create payroll items
         for item_data in data['items']:
             item = PayrollItem(
                 payroll_run_id=payroll_run.id,
@@ -681,13 +631,10 @@ def process_payroll():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/payroll/<int:run_id>/approve', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/payroll/<int:run_id>/approve', methods=['POST'])
 @jwt_required()
 def approve_payroll(run_id):
     """Approve payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -717,13 +664,10 @@ def approve_payroll(run_id):
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/payroll/<int:run_id>/reject', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/payroll/<int:run_id>/reject', methods=['POST'])
 @jwt_required()
 def reject_payroll(run_id):
     """Reject payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -756,13 +700,10 @@ def reject_payroll(run_id):
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/payroll/<int:run_id>/post', methods=['POST', 'OPTIONS'])
+@payroll_bp.route('/payroll/<int:run_id>/post', methods=['POST'])
 @jwt_required()
 def post_payroll_journal(run_id):
     """Post payroll journal entries"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -778,7 +719,6 @@ def post_payroll_journal(run_id):
         if payroll_run.status != 'approved':
             return jsonify({'error': 'Payroll must be approved before posting'}), 400
         
-        # Create journal entry
         journal = JournalEntry(
             church_id=church_id,
             entry_number=f"PR-{payroll_run.run_number}",
@@ -791,7 +731,6 @@ def post_payroll_journal(run_id):
         db.session.add(journal)
         db.session.flush()
         
-        # Get accounts (create if they don't exist)
         def get_or_create_account(name, type, code):
             account = Account.query.filter_by(
                 church_id=church_id,
@@ -821,15 +760,11 @@ def post_payroll_journal(run_id):
         paye_payable = get_or_create_account('PAYE Tax Payable', 'LIABILITY', '2130')
         withholding_payable = get_or_create_account('Withholding Tax Payable', 'LIABILITY', '2140')
         
-        # Get items for detailed breakdown
         items = payroll_run.items.all()
         
-        # Calculate totals from items
-        total_ssnit = sum(float(i.other_deductions * 0.3) for i in items)  # Approximate split
-        total_provident = sum(float(i.other_deductions * 0.5) for i in items)  # Approximate split
+        total_ssnit = sum(float(i.other_deductions * 0.3) for i in items)
+        total_provident = sum(float(i.other_deductions * 0.5) for i in items)
         
-        # Journal lines
-        # 1. Salary expense (gross)
         line1 = JournalLine(
             journal_entry_id=journal.id,
             account_id=salary_expense.id,
@@ -839,7 +774,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line1)
         
-        # 2. SSNIT expense (employer portion)
         line2 = JournalLine(
             journal_entry_id=journal.id,
             account_id=ssnit_expense.id,
@@ -849,7 +783,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line2)
         
-        # 3. Provident Fund expense (employer portion)
         line3 = JournalLine(
             journal_entry_id=journal.id,
             account_id=provident_fund_expense.id,
@@ -859,7 +792,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line3)
         
-        # 4. Salary payable (net)
         line4 = JournalLine(
             journal_entry_id=journal.id,
             account_id=salary_payable.id,
@@ -869,7 +801,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line4)
         
-        # 5. SSNIT payable
         line5 = JournalLine(
             journal_entry_id=journal.id,
             account_id=ssnit_payable.id,
@@ -879,7 +810,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line5)
         
-        # 6. Provident Fund payable
         line6 = JournalLine(
             journal_entry_id=journal.id,
             account_id=provident_fund_payable.id,
@@ -889,7 +819,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line6)
         
-        # 7. PAYE tax payable
         line7 = JournalLine(
             journal_entry_id=journal.id,
             account_id=paye_payable.id,
@@ -899,7 +828,6 @@ def post_payroll_journal(run_id):
         )
         db.session.add(line7)
         
-        # 8. Withholding tax payable (if any)
         if payroll_run.total_tax > 0:
             line8 = JournalLine(
                 journal_entry_id=journal.id,
@@ -910,7 +838,6 @@ def post_payroll_journal(run_id):
             )
             db.session.add(line8)
         
-        # Link journal to payroll run
         payroll_run.journal_entry_id = journal.id
         payroll_run.status = 'posted'
         payroll_run.processed_by = current_user.id
@@ -930,13 +857,10 @@ def post_payroll_journal(run_id):
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/payroll/<int:run_id>/payslips', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/payroll/<int:run_id>/payslips', methods=['GET'])
 @jwt_required()
 def get_payslips(run_id):
     """Generate payslips for payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         payroll_run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
@@ -950,7 +874,6 @@ def get_payslips(run_id):
         for item in items:
             employee = item.employee
             
-            # Get employee deductions breakdown
             deductions = []
             emp_deductions = EmployeeDeduction.query.filter_by(
                 employee_id=employee.id,
@@ -963,7 +886,6 @@ def get_payslips(run_id):
                     'amount': float(ed.amount or 0)
                 })
             
-            # Calculate tax breakdown
             tax_result = calculate_monthly_paye(float(item.gross_pay))
             
             payslip = {
@@ -1010,13 +932,10 @@ def get_payslips(run_id):
 
 # ==================== DEDUCTION TYPES ====================
 
-@payroll_bp.route('/deduction-types', methods=['GET', 'POST', 'OPTIONS'])
+@payroll_bp.route('/deduction-types', methods=['GET', 'POST'])
 @jwt_required()
 def manage_deduction_types():
     """Get or create deduction types"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -1033,7 +952,6 @@ def manage_deduction_types():
                 
             data = request.get_json()
             
-            # Validate required fields
             required_fields = ['name', 'calculation_type']
             for field in required_fields:
                 if field not in data:
@@ -1065,13 +983,10 @@ def manage_deduction_types():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/deduction-types/<int:type_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@payroll_bp.route('/deduction-types/<int:type_id>', methods=['PUT', 'DELETE'])
 @jwt_required()
 def update_deduction_type(type_id):
     """Update or delete deduction type"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -1110,7 +1025,6 @@ def update_deduction_type(type_id):
             }), 200
             
         elif request.method == 'DELETE':
-            # Soft delete
             deduction_type.is_active = False
             db.session.commit()
             
@@ -1124,13 +1038,10 @@ def update_deduction_type(type_id):
 
 # ==================== EMPLOYEE DEDUCTIONS ====================
 
-@payroll_bp.route('/employees/<int:employee_id>/deductions', methods=['GET', 'POST', 'OPTIONS'])
+@payroll_bp.route('/employees/<int:employee_id>/deductions', methods=['GET', 'POST'])
 @jwt_required()
 def manage_employee_deductions(employee_id):
     """Get or add employee deductions"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -1156,16 +1067,13 @@ def manage_employee_deductions(employee_id):
                 
             data = request.get_json()
             
-            # Validate required fields
             if 'deduction_type_id' not in data:
                 return jsonify({'error': 'deduction_type_id is required'}), 400
             
-            # Check if deduction type exists
             deduction_type = DeductionType.query.get(data['deduction_type_id'])
             if not deduction_type:
                 return jsonify({'error': 'Deduction type not found'}), 404
             
-            # Check if already exists
             existing = EmployeeDeduction.query.filter_by(
                 employee_id=employee_id,
                 deduction_type_id=data['deduction_type_id'],
@@ -1200,13 +1108,10 @@ def manage_employee_deductions(employee_id):
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/employees/<int:employee_id>/deductions/<int:deduction_id>', methods=['DELETE', 'OPTIONS'])
+@payroll_bp.route('/employees/<int:employee_id>/deductions/<int:deduction_id>', methods=['DELETE'])
 @jwt_required()
 def remove_employee_deduction(employee_id, deduction_id):
     """Remove employee deduction"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -1225,7 +1130,6 @@ def remove_employee_deduction(employee_id, deduction_id):
         if not deduction:
             return jsonify({'error': 'Deduction not found'}), 404
         
-        # Soft delete
         deduction.is_active = False
         db.session.commit()
         
@@ -1239,13 +1143,10 @@ def remove_employee_deduction(employee_id, deduction_id):
 
 # ==================== PAYROLL REPORTS ====================
 
-@payroll_bp.route('/reports/summary', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/reports/summary', methods=['GET'])
 @jwt_required()
 def get_payroll_summary():
     """Get payroll summary report"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         year = request.args.get('year', datetime.now().year, type=int)
@@ -1287,13 +1188,10 @@ def get_payroll_summary():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/reports/employee-earnings', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/reports/employee-earnings', methods=['GET'])
 @jwt_required()
 def get_employee_earnings():
     """Get employee earnings report"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         employee_id = request.args.get('employee_id', type=int)
@@ -1349,13 +1247,10 @@ def get_employee_earnings():
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/reports/tax-summary', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/reports/tax-summary', methods=['GET'])
 @jwt_required()
 def get_tax_summary():
     """Get tax summary report"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         year = request.args.get('year', datetime.now().year, type=int)
@@ -1397,17 +1292,13 @@ def get_tax_summary():
 
 # ==================== PAYROLL DASHBOARD ====================
 
-@payroll_bp.route('/dashboard', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/dashboard', methods=['GET'])
 @jwt_required()
 def get_payroll_dashboard():
     """Get payroll dashboard statistics"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         
-        # Employee counts
         total_employees = Employee.query.filter_by(
             church_id=church_id,
             status='active'
@@ -1421,7 +1312,6 @@ def get_payroll_dashboard():
             Employee.status == 'active'
         ).group_by(Employee.employment_type).all()
         
-        # Current month payroll
         today = datetime.now()
         month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
@@ -1431,25 +1321,22 @@ def get_payroll_dashboard():
             PayrollRun.period_end <= today
         ).first()
         
-        # Upcoming payroll
         next_payroll = PayrollRun.query.filter(
             PayrollRun.church_id == church_id,
             PayrollRun.status == 'draft'
         ).order_by(PayrollRun.payment_date).first()
         
-        # Recent payroll runs
         recent_runs = PayrollRun.query.filter_by(
             church_id=church_id
         ).order_by(
             PayrollRun.created_at.desc()
         ).limit(5).all()
         
-        # Monthly totals for current year
         year = today.year
         monthly_totals = []
         
         for month in range(1, 13):
-            month_start = datetime(year, month, 1)
+            month_start_date = datetime(year, month, 1)
             if month == 12:
                 month_end = datetime(year, 12, 31)
             else:
@@ -1457,13 +1344,13 @@ def get_payroll_dashboard():
             
             month_runs = PayrollRun.query.filter(
                 PayrollRun.church_id == church_id,
-                PayrollRun.period_start >= month_start,
+                PayrollRun.period_start >= month_start_date,
                 PayrollRun.period_end <= month_end
             ).all()
             
             total_net = sum(float(r.total_net) for r in month_runs)
             monthly_totals.append({
-                'month': month_start.strftime('%b'),
+                'month': month_start_date.strftime('%b'),
                 'total': round(total_net, 2)
             })
         
