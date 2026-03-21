@@ -104,7 +104,7 @@ def log_audit(action, resource=None, resource_id=None, data=None):
 
 @auth_bp.route('/setup', methods=['GET', 'POST'])
 def setup_admin():
-    """Temporary endpoint to create admin user - REMOVE AFTER USE"""
+    """Temporary endpoint to create/reset admin user"""
     try:
         from app.models import Church, Role, User
         from app.extensions import db
@@ -133,8 +133,10 @@ def setup_admin():
                 print(f"✅ Created role: {role_name}")
         db.session.commit()
         
-        # Create admin user
+        # Create or update admin user
         admin = User.query.filter_by(email='admin@church.org').first()
+        created = False
+        
         if not admin:
             admin = User(
                 email='admin@church.org',
@@ -146,27 +148,27 @@ def setup_admin():
                 is_active=True,
                 is_verified=True
             )
-            admin.set_password('admin123')
             db.session.add(admin)
-            db.session.commit()
+            created = True
             print("✅ Admin user created")
-            return jsonify({
-                'message': 'Setup complete - Admin user created',
-                'admin_created': True,
-                'email': 'admin@church.org',
-                'password': 'admin123'
-            }), 200
-        else:
-            return jsonify({
-                'message': 'Admin user already exists',
-                'admin_created': False,
-                'email': 'admin@church.org'
-            }), 200
+        
+        # ALWAYS reset the password to ensure it's correct
+        admin.set_password('admin123')
+        print("✅ Admin password reset to 'admin123'")
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Admin user ready',
+            'created': created,
+            'email': 'admin@church.org',
+            'password': 'admin123'
+        }), 200
             
     except Exception as e:
         print(f"❌ Setup error: {e}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    
 
 # ==================== AUTHENTICATION ENDPOINTS ====================
 
