@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: church_accounting
+      POSTGRES_USER: church_user
+      POSTGRES_PASSWORD: church_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U church_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://church_user:church_password@postgres:5432/church_accounting
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./ai_models:/app/ai_models
+    command: >
+      sh -c "python run.py"
+
+  celery-worker:
+    build: .
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://church_user:church_password@postgres:5432/church_accounting
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+      - redis
+      - postgres
+    volumes:
+      - ./logs:/app/logs
+      - ./ai_models:/app/ai_models
+    command: celery -A app.extensions.celery worker --loglevel=info
+
+  celery-beat:
+    build: .
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://church_user:church_password@postgres:5432/church_accounting
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+      - redis
+      - postgres
+    volumes:
+      - ./logs:/app/logs
+      - ./ai_models:/app/ai_models
+    command: celery -A app.extensions.celery beat --loglevel=info
+
+volumes:
+  postgres_data:
+  redis_data:
