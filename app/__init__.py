@@ -55,7 +55,7 @@ def create_app(config_name='production'):
     
     # CORS CONFIGURATION
     if config_name == 'production':
-        allowed_origins = os.environ.get('CORS_ORIGINS', 'https://your-frontend.vercel.app').split(',')
+        allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
     else:
         allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
