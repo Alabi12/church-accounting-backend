@@ -1,4 +1,4 @@
-# app/__init__.py - Fixed CORS configuration
+# app/__init__.py - Fixed CORS configuration with rate limiting disabled
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
@@ -76,7 +76,21 @@ def create_app(config_name='development'):
          allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
          expose_headers=["Content-Type", "Authorization"],
-         max_age=3600)  # Removed automatic_options=True - let it handle automatically
+         max_age=3600)
+    
+    # Add a before_request handler to handle OPTIONS requests early
+    @app.before_request
+    def handle_options():
+        """Handle OPTIONS requests early to bypass JWT authentication"""
+        if request.method == 'OPTIONS':
+            print(f"🔧 Handling OPTIONS preflight for {request.path}")
+            response = make_response()
+            response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', 'http://localhost:3000'))
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
+            response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+            response.headers.add("Access-Control-Max-Age", "3600")
+            return response, 200
     
     # Simple after_request for non-CORS headers only
     @app.after_request
@@ -88,46 +102,43 @@ def create_app(config_name='development'):
     
     mail.init_app(app)
     
-    print("🔵 STEP 7: Setting up rate limiter with memory storage...")
+    print("🔵 STEP 7: Setting up rate limiter...")
     
-    # Rate limiting setup with memory storage (no Redis required)
-    try:
-        limiter = Limiter(
-            get_remote_address,
-            app=app,
-            default_limits=[
-                "200 per day",
-                "50 per hour",
-                "10 per minute"
-            ],
-            storage_uri="memory://",
-            strategy="fixed-window",
-            headers_enabled=True,
-            auto_check=True,
-        )
-        
-        if config_name == 'production':
-            limiter.enabled = True
-            print("✅ Production rate limiting enabled with memory storage")
-        else:
-            limiter.enabled = False
-            print("⚠️ Rate limiting disabled for development")
-            
-    except Exception as e:
-        print(f"⚠️ Rate limiting setup failed: {e}")
-        class DummyLimiter:
-            def __init__(self):
-                self.enabled = False
-            def limit(self, *args, **kwargs):
-                return lambda f: f
-            def init_app(self, app):
-                pass
-            def __getattr__(self, name):
-                return lambda *args, **kwargs: None
-        
-        limiter = DummyLimiter()
+    # ============================================================
+    # COMPLETELY DISABLE RATE LIMITING FOR DEVELOPMENT
+    # ============================================================
     
+    # Create a dummy limiter that does absolutely nothing
+    class DummyLimiter:
+        def __init__(self):
+            self.enabled = False
+        
+        def limit(self, *args, **kwargs):
+            """Return a decorator that does nothing"""
+            def decorator(f):
+                return f
+            return decorator
+        
+        def init_app(self, app):
+            pass
+        
+        def __getattr__(self, name):
+            """Return a no-op function for any other method calls"""
+            return lambda *args, **kwargs: None
+    
+    # Create dummy limiter
+    limiter = DummyLimiter()
     app.limiter = limiter
+    
+    # Explicitly disable rate limiting in Flask config
+    app.config['RATELIMIT_ENABLED'] = False
+    app.config['RATELIMIT_DEFAULT'] = []
+    
+    if config_name == 'production':
+        # Even in production, use a placeholder for now
+        print("⚠️ Rate limiting is disabled for all environments")
+    else:
+        print("⚠️ Rate limiting completely disabled for development")
     
     print("🔵 STEP 8: Entering app context...")
     
@@ -332,7 +343,7 @@ def create_app(config_name='development'):
             'database': db_status,
             'cors_enabled': True,
             'cors_origins': allowed_origins,
-            'rate_limiting_enabled': limiter.enabled if hasattr(limiter, 'enabled') else False,
+            'rate_limiting_enabled': False,  # Always false now
             'socketio_enabled': False,
             'timestamp': datetime.utcnow().isoformat()
         }), 200
@@ -380,12 +391,13 @@ def create_app(config_name='development'):
             'message': 'Invalid data provided'
         }), 422
     
-    @app.errorhandler(429)
-    def ratelimit_error(error):
-        return jsonify({
-            'error': 'Rate limit exceeded',
-            'message': 'Too many requests. Please try again later.'
-        }), 429
+    # Remove the 429 error handler since rate limiting is disabled
+    # @app.errorhandler(429)
+    # def ratelimit_error(error):
+    #     return jsonify({
+    #         'error': 'Rate limit exceeded',
+    #         'message': 'Too many requests. Please try again later.'
+    #     }), 429
     
     print("🔵 STEP 16: Returning app...")
     print(f"🔵 FINAL: App is {app}")
