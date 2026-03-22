@@ -73,13 +73,10 @@ def ensure_user_church(user=None):
 
 # ==================== LEAVE BALANCES ====================
 
-@leave_bp.route('/balances', methods=['GET', 'OPTIONS'])
+@leave_bp.route('/balances', methods=['GET'])
 @jwt_required()
 def get_leave_balances():
     """Get all leave balances"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         
@@ -121,13 +118,10 @@ def get_leave_balances():
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/balances/initialize', methods=['POST', 'OPTIONS'])
+@leave_bp.route('/balances/initialize', methods=['POST'])
 @jwt_required()
 def initialize_leave_balances():
     """Initialize leave balances for a new year"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         current_user = get_current_user()
@@ -148,12 +142,12 @@ def initialize_leave_balances():
         existing = []
         
         leave_types = [
-            {'type': 'annual', 'entitlement': 20},  # 20 days annual leave
-            {'type': 'sick', 'entitlement': 15},    # 15 days sick leave
-            {'type': 'bereavement', 'entitlement': 5},  # 5 days bereavement
-            {'type': 'maternity', 'entitlement': 90},   # 90 days maternity
-            {'type': 'paternity', 'entitlement': 5},    # 5 days paternity
-            {'type': 'study', 'entitlement': 10},       # 10 days study leave
+            {'type': 'annual', 'entitlement': 20},
+            {'type': 'sick', 'entitlement': 15},
+            {'type': 'bereavement', 'entitlement': 5},
+            {'type': 'maternity', 'entitlement': 90},
+            {'type': 'paternity', 'entitlement': 5},
+            {'type': 'study', 'entitlement': 10},
         ]
         
         for employee in employees:
@@ -209,13 +203,10 @@ def initialize_leave_balances():
 
 # ==================== LEAVE REQUESTS ====================
 
-@leave_bp.route('/requests', methods=['GET', 'OPTIONS'])
+@leave_bp.route('/requests', methods=['GET'])
 @jwt_required()
 def get_leave_requests():
     """Get all leave requests"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         
@@ -267,20 +258,20 @@ def get_leave_requests():
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests', methods=['POST', 'OPTIONS'])
+@leave_bp.route('/requests', methods=['POST'])
 @jwt_required()
 def create_leave_request():
     """Create a new leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
+        print("[LEAVE] Creating leave request - POST request received")
+        
         current_user = get_current_user()
         
         if not current_user:
             return jsonify({'error': 'User not found'}), 401
             
         data = request.get_json()
+        print(f"[LEAVE] Request data: {data}")
         
         # Validate required fields
         required_fields = ['employee_id', 'leave_type', 'start_date', 'end_date']
@@ -341,6 +332,8 @@ def create_leave_request():
         db.session.add(audit_log)
         db.session.commit()
         
+        print(f"[LEAVE] Leave request created: {leave_request.id}")
+        
         return jsonify({
             'message': 'Leave request submitted successfully',
             'request': leave_request.to_dict()
@@ -353,13 +346,10 @@ def create_leave_request():
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests/<int:request_id>', methods=['GET', 'OPTIONS'])
+@leave_bp.route('/requests/<int:request_id>', methods=['GET'])
 @jwt_required()
 def get_leave_request(request_id):
     """Get a specific leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         
@@ -388,22 +378,22 @@ def get_leave_request(request_id):
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests/<int:request_id>/approve', methods=['POST', 'OPTIONS'])
+# In app/routes/leave_routes.py, update the approve_leave_request function
+@leave_bp.route('/requests/<int:request_id>/approve', methods=['POST'])
 @jwt_required()
 def approve_leave_request(request_id):
     """Approve a leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         current_user = get_current_user()
         
         if not current_user:
             return jsonify({'error': 'User not found'}), 401
         
-        # Check if user is admin or pastor
-        if not current_user.is_admin and current_user.role not in ['pastor', 'treasurer']:
-            return jsonify({'error': 'Unauthorized to approve leave requests'}), 403
+        # Check if user has permission to approve leave requests
+        # Check role instead of is_admin
+        allowed_roles = ['super_admin', 'admin', 'pastor', 'treasurer']
+        if current_user.role not in allowed_roles:
+            return jsonify({'error': 'Unauthorized to approve leave requests. Required role: super_admin, admin, pastor, or treasurer'}), 403
         
         leave_request = LeaveRequest.query.get(request_id)
         
@@ -424,7 +414,11 @@ def approve_leave_request(request_id):
             return jsonify({'error': 'Leave balance not found'}), 404
         
         if balance.remaining < leave_request.days_requested:
-            return jsonify({'error': 'Insufficient leave balance'}), 400
+            return jsonify({
+                'error': 'Insufficient leave balance',
+                'available': balance.remaining,
+                'requested': leave_request.days_requested
+            }), 400
         
         # Update balance
         balance.used += leave_request.days_requested
@@ -448,23 +442,20 @@ def approve_leave_request(request_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-
-@leave_bp.route('/requests/<int:request_id>/reject', methods=['POST', 'OPTIONS'])
+@leave_bp.route('/requests/<int:request_id>/reject', methods=['POST'])
 @jwt_required()
 def reject_leave_request(request_id):
     """Reject a leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         current_user = get_current_user()
         
         if not current_user:
             return jsonify({'error': 'User not found'}), 401
         
-        # Check if user is admin or pastor
-        if not current_user.is_admin and current_user.role not in ['pastor', 'treasurer']:
-            return jsonify({'error': 'Unauthorized to reject leave requests'}), 403
+        # Check if user has permission to reject leave requests
+        allowed_roles = ['super_admin', 'admin', 'pastor', 'treasurer']
+        if current_user.role not in allowed_roles:
+            return jsonify({'error': 'Unauthorized to reject leave requests. Required role: super_admin, admin, pastor, or treasurer'}), 403
         
         leave_request = LeaveRequest.query.get(request_id)
         
@@ -494,17 +485,26 @@ def reject_leave_request(request_id):
         logger.error(f"Error rejecting leave request: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+# ==================== TEST ENDPOINT ====================
+
+@leave_bp.route('/test', methods=['GET', 'OPTIONS'])
+def test_leave():
+    """Test endpoint to verify leave blueprint is working"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    return jsonify({
+        'message': 'Leave blueprint is working!',
+        'status': 'ok',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
 
 
 # ==================== LEAVE CALENDAR ====================
 
-@leave_bp.route('/calendar', methods=['GET', 'OPTIONS'])
+@leave_bp.route('/calendar', methods=['GET'])
 @jwt_required()
 def get_leave_calendar():
     """Get leave calendar for visualization"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church()
         year = request.args.get('year', datetime.now().year, type=int)
@@ -543,7 +543,7 @@ def get_leave_calendar():
                 'id': req.id,
                 'title': f"{req.employee.full_name()} - {req.leave_type}",
                 'start': req.start_date.isoformat(),
-                'end': (req.end_date + timedelta(days=1)).isoformat(),  # FullCalendar needs end date exclusive
+                'end': (req.end_date + timedelta(days=1)).isoformat(),
                 'color': get_leave_color(req.leave_type),
                 'extendedProps': {
                     'employee_id': req.employee_id,
@@ -565,12 +565,12 @@ def get_leave_calendar():
 def get_leave_color(leave_type):
     """Get color for leave type in calendar"""
     colors = {
-        'annual': '#3498db',  # Blue
-        'sick': '#e74c3c',    # Red
-        'bereavement': '#95a5a6',  # Gray
-        'maternity': '#9b59b6',    # Purple
-        'paternity': '#3498db',    # Blue
-        'study': '#f39c12',        # Orange
-        'unpaid': '#2c3e50'        # Dark blue
+        'annual': '#3498db',
+        'sick': '#e74c3c',
+        'bereavement': '#95a5a6',
+        'maternity': '#9b59b6',
+        'paternity': '#3498db',
+        'study': '#f39c12',
+        'unpaid': '#2c3e50'
     }
     return colors.get(leave_type, '#3498db')
