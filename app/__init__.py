@@ -1,4 +1,4 @@
-# app/__init__.py - Updated for local development with memory storage rate limiting
+# app/__init__.py - Fixed CORS configuration with rate limiting disabled
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import os
@@ -15,7 +15,7 @@ from flask import g
 # Import socketio from helper (handles production gracefully)
 from app.socketio_helper import socketio, emit, join_room, leave_room
 
-def create_app(config_name='development'):  # Changed default to development for local testing
+def create_app(config_name='development'):
     print(f"🔵 STEP 1: create_app started with config: {config_name}")
     
     app = Flask(__name__)
@@ -53,7 +53,7 @@ def create_app(config_name='development'):  # Changed default to development for
     
     print("🔵 STEP 6: Configuring CORS...")
     
-    # CORS CONFIGURATION - FIXED FOR LOCAL DEVELOPMENT
+    # CORS CONFIGURATION - Let Flask-CORS handle all CORS including OPTIONS
     if config_name == 'production':
         allowed_origins = os.environ.get('CORS_ORIGINS', 'https://church-accounting-frontend.vercel.app').split(',')
         print(f"✅ Production CORS origins: {allowed_origins}")
@@ -69,91 +69,76 @@ def create_app(config_name='development'):  # Changed default to development for
         ]
         print(f"🔧 Development CORS origins: {allowed_origins}")
 
-    # Configure CORS with more permissive settings for development
+    # Configure CORS - This handles all CORS including OPTIONS preflight requests
     CORS(app, 
          origins=allowed_origins,
          supports_credentials=True,
          allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
          methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
          expose_headers=["Content-Type", "Authorization"],
-         max_age=3600)  # Cache preflight requests for 1 hour
+         max_age=3600)
     
-    # Add OPTIONS handler for all routes to ensure CORS headers are sent
+    # Add a before_request handler to handle OPTIONS requests early
+    @app.before_request
+    def handle_options():
+        """Handle OPTIONS requests early to bypass JWT authentication"""
+        if request.method == 'OPTIONS':
+            print(f"🔧 Handling OPTIONS preflight for {request.path}")
+            response = make_response()
+            response.headers.add("Access-Control-Allow-Origin", request.headers.get('Origin', 'http://localhost:3000'))
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
+            response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+            response.headers.add("Access-Control-Max-Age", "3600")
+            return response, 200
+    
+    # Simple after_request for non-CORS headers only
     @app.after_request
-    def after_request(response):
-        origin = request.headers.get('Origin')
-        if origin and origin in allowed_origins:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
+    def add_security_headers(response):
+        # Only add security headers, NOT CORS headers (they're already added by Flask-CORS)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
         return response
-    
-    # Explicitly handle OPTIONS requests for all routes
-    @app.route('/<path:path>', methods=['OPTIONS'])
-    def handle_options(path):
-        """Handle preflight OPTIONS requests"""
-        response = make_response()
-        origin = request.headers.get('Origin')
-        if origin and origin in allowed_origins:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,PATCH')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
-            response.headers.add('Access-Control-Max-Age', '3600')
-        return response, 200
     
     mail.init_app(app)
     
-    print("🔵 STEP 7: Setting up rate limiter with memory storage...")
+    print("🔵 STEP 7: Setting up rate limiter...")
     
-    # Rate limiting setup with memory storage (no Redis required)
-    try:
-        # Initialize rate limiter with memory storage
-        limiter = Limiter(
-            get_remote_address,
-            app=app,
-            default_limits=[
-                "200 per day",      # 200 requests per day per IP
-                "50 per hour",      # 50 requests per hour per IP
-                "10 per minute"     # 10 requests per minute per IP
-            ],
-            storage_uri="memory://",  # Use in-memory storage
-            strategy="fixed-window",  # Fixed window rate limiting strategy
-            headers_enabled=True,     # Add rate limit headers to responses
-            auto_check=True,          # Automatically check limits on every request
-        )
-        
-        # Enable or disable based on environment
-        if config_name == 'production':
-            limiter.enabled = True
-            print("✅ Production rate limiting enabled with memory storage")
-            print("   Limits: 200/day, 50/hour, 10/minute per IP")
-        else:
-            limiter.enabled = False
-            print("⚠️ Rate limiting disabled for development")
-            
-    except Exception as e:
-        print(f"⚠️ Rate limiting setup failed: {e}")
-        print("⚠️ Continuing without rate limiting")
-        # Create a dummy limiter that does nothing
-        class DummyLimiter:
-            def __init__(self):
-                self.enabled = False
-                
-            def limit(self, *args, **kwargs):
-                return lambda f: f
-                
-            def init_app(self, app):
-                pass
-                
-            def __getattr__(self, name):
-                return lambda *args, **kwargs: None
-        
-        limiter = DummyLimiter()
+    # ============================================================
+    # COMPLETELY DISABLE RATE LIMITING FOR DEVELOPMENT
+    # ============================================================
     
-    # Store limiter in app for use in routes
+    # Create a dummy limiter that does absolutely nothing
+    class DummyLimiter:
+        def __init__(self):
+            self.enabled = False
+        
+        def limit(self, *args, **kwargs):
+            """Return a decorator that does nothing"""
+            def decorator(f):
+                return f
+            return decorator
+        
+        def init_app(self, app):
+            pass
+        
+        def __getattr__(self, name):
+            """Return a no-op function for any other method calls"""
+            return lambda *args, **kwargs: None
+    
+    # Create dummy limiter
+    limiter = DummyLimiter()
     app.limiter = limiter
+    
+    # Explicitly disable rate limiting in Flask config
+    app.config['RATELIMIT_ENABLED'] = False
+    app.config['RATELIMIT_DEFAULT'] = []
+    
+    if config_name == 'production':
+        # Even in production, use a placeholder for now
+        print("⚠️ Rate limiting is disabled for all environments")
+    else:
+        print("⚠️ Rate limiting completely disabled for development")
     
     print("🔵 STEP 8: Entering app context...")
     
@@ -170,18 +155,15 @@ def create_app(config_name='development'):  # Changed default to development for
         print("🔵 STEP 11: Checking/Creating database tables...")
         
         try:
-            # Check if tables already exist
             inspector = inspect(db.engine)
             existing_tables = inspector.get_table_names()
             
             if not existing_tables:
-                # Only create tables if none exist
                 db.create_all()
                 print("🔵 STEP 12: Database tables created")
             else:
                 print(f"🔵 STEP 12: Database tables already exist ({len(existing_tables)} tables found)")
                 
-                # Run any pending migrations if needed
                 try:
                     from flask_migrate import upgrade
                     upgrade()
@@ -342,24 +324,13 @@ def create_app(config_name='development'):  # Changed default to development for
     @app.before_request
     def log_request_info():
         if config_name == 'development':
+            # Log all requests for debugging
             print(f"📥 {request.method} {request.path} from {request.headers.get('Origin')}")
-        elif request.method == 'OPTIONS':
-            # Log OPTIONS requests in production for debugging
-            print(f"📥 OPTIONS request to {request.path} from {request.headers.get('Origin')}")
+            if request.method == 'OPTIONS':
+                print(f"   🔄 Preflight request received")
     
-    @app.route('/health', methods=['GET', 'OPTIONS'])
+    @app.route('/health', methods=['GET'])
     def health_check():
-        if request.method == 'OPTIONS':
-            # Handle preflight for health check
-            response = make_response()
-            origin = request.headers.get('Origin')
-            if origin and origin in allowed_origins:
-                response.headers.add('Access-Control-Allow-Origin', origin)
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-                response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response, 200
-            
         db_status = 'healthy'
         try:
             db.session.execute('SELECT 1').scalar()
@@ -372,28 +343,28 @@ def create_app(config_name='development'):  # Changed default to development for
             'database': db_status,
             'cors_enabled': True,
             'cors_origins': allowed_origins,
-            'rate_limiting_enabled': limiter.enabled if hasattr(limiter, 'enabled') else False,
+            'rate_limiting_enabled': False,  # Always false now
             'socketio_enabled': False,
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     
-    @app.route('/api/test', methods=['GET', 'OPTIONS'])
+    @app.route('/api/test', methods=['GET'])
     def test_endpoint():
         """Simple test endpoint"""
-        if request.method == 'OPTIONS':
-            response = make_response()
-            origin = request.headers.get('Origin')
-            if origin and origin in allowed_origins:
-                response.headers.add('Access-Control-Allow-Origin', origin)
-                response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-                response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-                response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response, 200
-        
         return jsonify({
             'message': 'Backend is working',
             'status': 'ok',
             'timestamp': datetime.utcnow().isoformat()
+        }), 200
+    
+    @app.route('/debug/cors', methods=['GET'])
+    def debug_cors():
+        """Debug endpoint to check CORS headers"""
+        return jsonify({
+            'message': 'CORS debug endpoint',
+            'request_origin': request.headers.get('Origin'),
+            'request_headers': dict(request.headers),
+            'allowed_origins': allowed_origins
         }), 200
     
     # Error handlers
@@ -420,12 +391,13 @@ def create_app(config_name='development'):  # Changed default to development for
             'message': 'Invalid data provided'
         }), 422
     
-    @app.errorhandler(429)
-    def ratelimit_error(error):
-        return jsonify({
-            'error': 'Rate limit exceeded',
-            'message': 'Too many requests. Please try again later.'
-        }), 429
+    # Remove the 429 error handler since rate limiting is disabled
+    # @app.errorhandler(429)
+    # def ratelimit_error(error):
+    #     return jsonify({
+    #         'error': 'Rate limit exceeded',
+    #         'message': 'Too many requests. Please try again later.'
+    #     }), 429
     
     print("🔵 STEP 16: Returning app...")
     print(f"🔵 FINAL: App is {app}")
