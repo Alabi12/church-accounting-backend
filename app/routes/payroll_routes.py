@@ -346,6 +346,8 @@ def get_payroll_run(run_id):
         return jsonify({'error': str(e)}), 500
 
 
+# In app/routes/payroll_routes.py
+
 @payroll_bp.route('/payroll/<int:run_id>/approve', methods=['POST'])
 @jwt_required()
 def approve_payroll(run_id):
@@ -371,13 +373,108 @@ def approve_payroll(run_id):
         
         db.session.commit()
         
+        print(f"✅ Payroll run {run_id} approved successfully")
+        
         return jsonify({'message': 'Payroll approved successfully'}), 200
         
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error approving payroll: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
+@payroll_bp.route('/payroll/<int:run_id>/reject', methods=['POST'])
+@jwt_required()
+def reject_payroll(run_id):
+    """Reject payroll run"""
+    try:
+        church_id = ensure_user_church()
+        current_user = get_current_user()
+        
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+            
+        payroll_run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        if payroll_run.status != 'draft':
+            return jsonify({'error': f'Payroll run is already {payroll_run.status}'}), 400
+        
+        data = request.get_json() or {}
+        reason = data.get('reason', 'No reason provided')
+        
+        payroll_run.status = 'rejected'
+        payroll_run.approved_by = current_user.id
+        payroll_run.approved_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        print(f"❌ Payroll run {run_id} rejected. Reason: {reason}")
+        
+        return jsonify({
+            'message': 'Payroll rejected',
+            'reason': reason,
+            'payroll_run': payroll_run.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error rejecting payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+@payroll_bp.route('/payroll/<int:run_id>/payslips', methods=['GET'])
+@jwt_required()
+def get_payslips_for_run(run_id):
+    """Get payslips for a specific payroll run"""
+    try:
+        church_id = ensure_user_church()
+        
+        payroll_run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        items = payroll_run.items.all()
+        payslips = []
+        
+        for item in items:
+            employee = item.employee
+            if employee:
+                payslip = {
+                    'id': item.id,
+                    'employee_id': employee.id,
+                    'employee_name': employee.full_name(),
+                    'employee_code': employee.employee_code,
+                    'department': employee.department,
+                    'period_start': payroll_run.period_start.isoformat(),
+                    'period_end': payroll_run.period_end.isoformat(),
+                    'payment_date': payroll_run.payment_date.isoformat(),
+                    'gross_pay': float(item.gross_pay),
+                    'tax_amount': float(item.tax_amount),
+                    'other_deductions': float(item.other_deductions),
+                    'total_deductions': float(item.total_deductions),
+                    'net_pay': float(item.net_pay),
+                    'status': 'generated'
+                }
+                payslips.append(payslip)
+        
+        return jsonify({
+            'payslips': payslips,
+            'run': payroll_run.to_dict(),
+            'total_employees': len(payslips),
+            'total_net': sum(p['net_pay'] for p in payslips)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payslips: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @payroll_bp.route('/payroll/<int:run_id>/post', methods=['POST'])
 @jwt_required()
@@ -649,3 +746,240 @@ def get_payroll_dashboard():
         logger.error(f"Error getting payroll dashboard: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+# In app/routes/payroll_routes.py
+
+@payroll_bp.route('/calculate', methods=['POST'])
+@jwt_required()
+def calculate_payroll():
+    """Calculate payroll for a period"""
+    try:
+        church_id = ensure_user_church()
+        data = request.get_json()
+        
+        print(f"📊 Calculate payroll called with data: {data}")
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+        
+        if not period_start or not period_end:
+            return jsonify({'error': 'period_start and period_end are required'}), 400
+        
+        # Parse dates
+        start = datetime.fromisoformat(period_start.replace('Z', '+00:00'))
+        end = datetime.fromisoformat(period_end.replace('Z', '+00:00'))
+        
+        # Get all active employees
+        employees = Employee.query.filter_by(
+            church_id=church_id,
+            status='active'
+        ).all()
+        
+        print(f"Found {len(employees)} active employees")
+        
+        if not employees:
+            return jsonify({
+                'employee_count': 0,
+                'items': [],
+                'summary': {
+                    'total_gross': 0,
+                    'total_ssnit': 0,
+                    'total_provident_fund': 0,
+                    'total_paye': 0,
+                    'total_withholding_tax': 0,
+                    'total_deductions': 0,
+                    'total_net': 0
+                }
+            }), 200
+        
+        # Calculate payroll for each employee
+        payroll_items = []
+        total_gross = 0
+        total_ssnit = 0
+        total_provident_fund = 0
+        total_paye = 0
+        total_withholding = 0
+        total_net = 0
+        
+        for employee in employees:
+            # Calculate monthly gross
+            if employee.pay_frequency == 'monthly':
+                monthly_gross = float(employee.pay_rate)
+            elif employee.pay_frequency == 'bi-weekly':
+                monthly_gross = float(employee.pay_rate) * 26 / 12
+            elif employee.pay_frequency == 'weekly':
+                monthly_gross = float(employee.pay_rate) * 52 / 12
+            else:
+                monthly_gross = float(employee.pay_rate)
+            
+            # Calculate period factor
+            days_in_period = (end - start).days + 1
+            days_in_month = 30
+            period_factor = days_in_period / days_in_month
+            
+            period_gross = monthly_gross * period_factor
+            
+            # Calculate deductions
+            ssnit_amount = period_gross * 0.055 if employee.employment_type in ['full-time', 'part-time'] else 0
+            provident_fund_amount = period_gross * 0.165 if employee.employment_type in ['full-time', 'part-time'] else 0
+            
+            # Calculate PAYE (simplified - you can use your full calculation)
+            paye_amount = period_gross * 0.15 if period_gross > 490 else 0  # Simplified for testing
+            
+            # Calculate net pay
+            total_deductions = ssnit_amount + provident_fund_amount + paye_amount
+            net_pay = period_gross - total_deductions
+            
+            payroll_items.append({
+                'employee_id': employee.id,
+                'employee_name': employee.full_name(),
+                'department': employee.department or 'N/A',
+                'employment_type': employee.employment_type,
+                'pay_frequency': employee.pay_frequency,
+                'monthly_rate': round(monthly_gross, 2),
+                'period_gross': round(period_gross, 2),
+                'ssnit': round(ssnit_amount, 2),
+                'provident_fund': round(provident_fund_amount, 2),
+                'paye': round(paye_amount, 2),
+                'withholding_tax': 0,
+                'other_deductions': 0,
+                'deduction_details': [],
+                'total_deductions': round(total_deductions, 2),
+                'net_pay': round(net_pay, 2)
+            })
+            
+            total_gross += period_gross
+            total_ssnit += ssnit_amount
+            total_provident_fund += provident_fund_amount
+            total_paye += paye_amount
+            total_net += net_pay
+        
+        return jsonify({
+            'period_start': start.isoformat(),
+            'period_end': end.isoformat(),
+            'payment_date': end.isoformat(),
+            'employee_count': len(payroll_items),
+            'summary': {
+                'total_gross': round(total_gross, 2),
+                'total_ssnit': round(total_ssnit, 2),
+                'total_provident_fund': round(total_provident_fund, 2),
+                'total_paye': round(total_paye, 2),
+                'total_withholding_tax': round(total_withholding, 2),
+                'total_deductions': round(total_ssnit + total_provident_fund + total_paye, 2),
+                'total_net': round(total_net, 2)
+            },
+            'items': payroll_items
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error calculating payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+        # In app/routes/payroll_routes.py
+
+@payroll_bp.route('/process', methods=['POST'])
+@jwt_required()
+def process_payroll():
+    """Process and save payroll run"""
+    try:
+        church_id = ensure_user_church()
+        current_user = get_current_user()
+        
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+            
+        data = request.get_json()
+        
+        # Log the received data for debugging
+        print(f"📊 Processing payroll with data: {data}")
+        
+        # Validate required data
+        if not data.get('period_start') or not data.get('period_end'):
+            return jsonify({'error': 'period_start and period_end are required'}), 400
+        
+        if not data.get('summary'):
+            return jsonify({'error': 'summary data is required'}), 400
+        
+        # Generate run number
+        year = datetime.now().year
+        month = datetime.now().month
+        run_count = PayrollRun.query.filter(
+            PayrollRun.run_number.like(f'PR-{year}-{month:02d}%')
+        ).count() + 1
+        
+        run_number = f"PR-{year}-{month:02d}-{run_count:02d}"
+        
+        # Parse dates
+        period_start = datetime.fromisoformat(data['period_start'].replace('Z', '+00:00'))
+        period_end = datetime.fromisoformat(data['period_end'].replace('Z', '+00:00'))
+        payment_date = datetime.fromisoformat(data.get('payment_date', data['period_end']).replace('Z', '+00:00'))
+        
+        # Create payroll run
+        payroll_run = PayrollRun(
+            church_id=church_id,
+            run_number=run_number,
+            period_start=period_start,
+            period_end=period_end,
+            payment_date=payment_date,
+            total_gross=data['summary']['total_gross'],
+            total_deductions=data['summary']['total_deductions'],
+            total_tax=data['summary'].get('total_paye', 0),
+            total_net=data['summary']['total_net'],
+            status='draft',
+            created_by=current_user.id
+        )
+        
+        db.session.add(payroll_run)
+        db.session.flush()
+        
+        # Create payroll items
+        items_created = 0
+        for item_data in data.get('items', []):
+            # Calculate other deductions (SSNIT + Provident Fund + Withholding + Other)
+            other_deductions = (
+                item_data.get('ssnit', 0) + 
+                item_data.get('provident_fund', 0) + 
+                item_data.get('withholding_tax', 0) + 
+                item_data.get('other_deductions', 0)
+            )
+            
+            item = PayrollItem(
+                payroll_run_id=payroll_run.id,
+                employee_id=item_data['employee_id'],
+                regular_pay=item_data.get('period_gross', item_data.get('gross_pay', 0)),
+                gross_pay=item_data.get('period_gross', item_data.get('gross_pay', 0)),
+                tax_amount=item_data.get('paye', 0),
+                other_deductions=other_deductions,
+                total_deductions=item_data['total_deductions'],
+                net_pay=item_data['net_pay']
+            )
+            db.session.add(item)
+            items_created += 1
+        
+        db.session.commit()
+        
+        print(f"✅ Payroll processed successfully: {run_number} with {items_created} items")
+        
+        return jsonify({
+            'message': 'Payroll processed successfully',
+            'payroll_run': payroll_run.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error processing payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+    # In app/routes/payroll_routes.py
+
+@payroll_bp.route('/payroll/process', methods=['POST'])
+@jwt_required()
+def process_payroll_alias():
+    """Alias for process payroll (handles /api/payroll/payroll/process)"""
+    return process_payroll()
