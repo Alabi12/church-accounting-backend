@@ -306,7 +306,43 @@ def toggle_user_status(user_id):
         logger.error(f"Error toggling user status: {str(e)}")
         return jsonify({'error': 'Failed to update user status'}), 500
 
+# Add this after the toggle_user_status endpoint, before the export_users endpoint
 
+@admin_bp.route('/users/check-username/<username>', methods=['GET', 'OPTIONS'])
+@token_required
+@role_required('super_admin', 'admin')
+def check_username(username):
+    """Check if username is available"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = g.current_user.church_id
+        
+        # Check if username exists in this church
+        existing_user = User.query.filter_by(
+            username=username.strip(),
+            church_id=church_id
+        ).first()
+        
+        # Also check if username exists in default church if user is super_admin
+        if not existing_user and g.current_user.role == 'super_admin':
+            # Super admins can see users from all churches for username check
+            existing_user = User.query.filter_by(username=username.strip()).first()
+        
+        return jsonify({
+            'available': existing_user is None,
+            'message': 'Username available' if not existing_user else 'Username already taken'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error checking username: {str(e)}")
+        return jsonify({
+            'available': True,
+            'message': 'Username check failed, will validate on submit',
+            'error': str(e)
+        }), 200
+    
 @admin_bp.route('/users/export', methods=['GET', 'OPTIONS'])
 @token_required
 @role_required('super_admin', 'admin')
