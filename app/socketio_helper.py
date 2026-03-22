@@ -30,13 +30,14 @@ if os.environ.get('FLASK_ENV') == 'production':
     emit = dummy_emit
     join_room = dummy_emit
     leave_room = dummy_emit
+    print("SocketIO disabled (production mode)")
 else:
     try:
         from flask_socketio import SocketIO, emit, join_room, leave_room
         socketio = SocketIO(async_mode='threading')
-        print("✅ SocketIO enabled for development")
+        print("SocketIO enabled for development")  # Removed emoji
     except ImportError as e:
-        print(f"⚠️ SocketIO import failed: {e}")
+        print(f"SocketIO import failed: {e}")  # Removed emoji
         socketio = DummySocketIO()
         emit = dummy_emit
         join_room = dummy_emit
