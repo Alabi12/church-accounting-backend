@@ -1,5 +1,5 @@
 # app/routes/treasurer_routes.py
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, make_response
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.models import Budget, Transaction, Account, User, AuditLog, Church
 from app.extensions import db
@@ -7,14 +7,6 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, and_, or_, desc, extract
 import traceback
 import logging
-
-# Import socketio if you use it
-try:
-    from app import socketio
-    SOCKETIO_AVAILABLE = True
-except ImportError:
-    SOCKETIO_AVAILABLE = False
-    print("⚠️ SocketIO not available")
 
 logger = logging.getLogger(__name__)
 treasurer_bp = Blueprint('treasurer', __name__)
@@ -121,45 +113,6 @@ def get_dashboard_stats():
             Account.is_active == True
         ).scalar() or 0
         
-        # Calculate monthly growth
-        last_month_start = (first_day - timedelta(days=1)).replace(day=1)
-        last_month_end = first_day - timedelta(days=1)
-        
-        this_month_income = db.session.query(func.sum(Transaction.amount)).filter(
-            Transaction.church_id == church_id,
-            Transaction.transaction_type == 'INCOME',
-            Transaction.status == 'POSTED',
-            Transaction.transaction_date >= first_day
-        ).scalar() or 0
-        
-        last_month_income = db.session.query(func.sum(Transaction.amount)).filter(
-            Transaction.church_id == church_id,
-            Transaction.transaction_type == 'INCOME',
-            Transaction.status == 'POSTED',
-            Transaction.transaction_date >= last_month_start,
-            Transaction.transaction_date <= last_month_end
-        ).scalar() or 0
-        
-        monthly_growth = 0
-        if last_month_income > 0:
-            monthly_growth = ((this_month_income - last_month_income) / last_month_income) * 100
-        
-        # Calculate budget utilization
-        total_budget = db.session.query(func.sum(Budget.amount)).filter(
-            Budget.church_id == church_id,
-            Budget.status == 'APPROVED'
-        ).scalar() or 0
-        
-        # Note: Use actual_amount if available, otherwise use amount
-        total_approved = db.session.query(func.sum(Budget.amount)).filter(
-            Budget.church_id == church_id,
-            Budget.status == 'APPROVED'
-        ).scalar() or 0
-        
-        budget_utilization = 0
-        if total_budget > 0:
-            budget_utilization = (total_approved / total_budget) * 100
-        
         return jsonify({
             'totalIncome': float(total_income),
             'totalExpenses': float(total_expenses),
@@ -167,8 +120,7 @@ def get_dashboard_stats():
             'pendingApprovals': pending_approvals,
             'pendingTransactions': pending_transactions,
             'accountBalance': float(account_balance),
-            'monthlyGrowth': round(monthly_growth, 1),
-            'budgetUtilization': round(budget_utilization, 1)
+            'pendingBudgets': pending_budgets
         }), 200
         
     except Exception as e:
@@ -193,25 +145,35 @@ def create_budget():
         
         print(f"📝 Creating budget with data: {data}")
         
-        # Create new budget - include all required fields
+        # Create new budget
         budget = Budget(
             church_id=church_id,
             name=data.get('name'),
             description=data.get('description', ''),
             department=data.get('department'),
             fiscal_year=data.get('fiscal_year', datetime.now().year),
-            period='annual',  # Set default period
+            period=data.get('period', 'annual'),
             amount=data.get('amount', 0),
             priority=data.get('priority', 'MEDIUM'),
             budget_type=data.get('budget_type', 'EXPENSE'),
             justification=data.get('justification', ''),
             status='DRAFT',
             created_by=current_user.id if current_user else None,
-            # Initialize monthly amounts to 0
-            january=0, february=0, march=0, april=0, may=0, june=0,
-            july=0, august=0, september=0, october=0, november=0, december=0,
-            # Initialize variance fields
-            actual_amount=0, variance=0, variance_percentage=0
+            account_id=data.get('account_id'),
+            account_code=data.get('account_code'),
+            # Initialize monthly amounts
+            january=data.get('monthly', {}).get('january', 0),
+            february=data.get('monthly', {}).get('february', 0),
+            march=data.get('monthly', {}).get('march', 0),
+            april=data.get('monthly', {}).get('april', 0),
+            may=data.get('monthly', {}).get('may', 0),
+            june=data.get('monthly', {}).get('june', 0),
+            july=data.get('monthly', {}).get('july', 0),
+            august=data.get('monthly', {}).get('august', 0),
+            september=data.get('monthly', {}).get('september', 0),
+            october=data.get('monthly', {}).get('october', 0),
+            november=data.get('monthly', {}).get('november', 0),
+            december=data.get('monthly', {}).get('december', 0)
         )
         
         # Add optional dates if provided
@@ -225,23 +187,9 @@ def create_budget():
         
         print(f"✅ Budget created with ID: {budget.id}")
         
-        # Log audit
-        if current_user:
-            audit_log = AuditLog(
-                user_id=current_user.id,
-                action='CREATE_BUDGET',
-                resource='budget',
-                resource_id=budget.id,
-                data={'name': budget.name, 'amount': float(budget.amount)},
-                ip_address=request.remote_addr,
-                user_agent=request.user_agent.string if request.user_agent else None
-            )
-            db.session.add(audit_log)
-            db.session.commit()
-        
         return jsonify({
             'message': 'Budget created successfully',
-            'budget': budget.to_dict() if hasattr(budget, 'to_dict') else {'id': budget.id, 'name': budget.name}
+            'budget': budget.to_dict()
         }), 201
         
     except Exception as e:
@@ -249,6 +197,7 @@ def create_budget():
         logger.error(f"Error creating budget: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': f'Failed to create budget: {str(e)}'}), 500
+
 
 @treasurer_bp.route('/budgets', methods=['GET', 'OPTIONS'])
 @token_required
@@ -281,14 +230,6 @@ def get_budgets():
                 )
             )
         
-        min_amount = request.args.get('minAmount', type=float)
-        if min_amount:
-            query = query.filter(Budget.amount >= min_amount)
-        
-        max_amount = request.args.get('maxAmount', type=float)
-        if max_amount:
-            query = query.filter(Budget.amount <= max_amount)
-        
         # Get paginated results
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 20, type=int)
@@ -300,32 +241,10 @@ def get_budgets():
         # Format budgets
         budget_list = []
         for budget in paginated.items:
+            budget_dict = budget.to_dict()
             submitter = User.query.get(budget.created_by)
-            
-            budget_dict = {
-                'id': budget.id,
-                'name': budget.name,
-                'description': budget.description,
-                'department': budget.department,
-                'fiscal_year': budget.fiscal_year,
-                'amount': float(budget.amount),
-                'priority': budget.priority,
-                'budget_type': budget.budget_type,
-                'justification': budget.justification,
-                'status': budget.status,
-                'start_date': budget.start_date.isoformat() if budget.start_date else None,
-                'end_date': budget.end_date.isoformat() if budget.end_date else None,
-                'created_by': budget.created_by,
-                'created_at': budget.created_at.isoformat() if budget.created_at else None,
-                'submitted_by': budget.submitted_by,
-                'submitted_at': budget.submitted_at.isoformat() if budget.submitted_at else None,
-                'approved_by': budget.approved_by,
-                'approved_at': budget.approved_at.isoformat() if budget.approved_at else None
-            }
-            
             if submitter:
                 budget_dict['submitted_by_name'] = submitter.full_name if submitter else 'Unknown'
-            
             budget_list.append(budget_dict)
         
         # Calculate stats
@@ -370,41 +289,7 @@ def get_budget(budget_id):
         if not budget:
             return jsonify({'error': 'Budget not found'}), 404
         
-        # Get submitter info
-        submitter = User.query.get(budget.created_by)
-        approver = User.query.get(budget.approved_by)
-        rejecter = User.query.get(budget.rejected_by)
-        
-        budget_data = {
-            'id': budget.id,
-            'name': budget.name,
-            'description': budget.description,
-            'department': budget.department,
-            'fiscal_year': budget.fiscal_year,
-            'period': budget.period if hasattr(budget, 'period') else 'annual',
-            'amount': float(budget.amount),
-            'priority': budget.priority,
-            'budget_type': budget.budget_type,
-            'justification': budget.justification,
-            'status': budget.status,
-            'start_date': budget.start_date.isoformat() if budget.start_date else None,
-            'end_date': budget.end_date.isoformat() if budget.end_date else None,
-            'created_by': budget.created_by,
-            'created_by_name': submitter.full_name if submitter else None,
-            'created_at': budget.created_at.isoformat() if budget.created_at else None,
-            'submitted_by': budget.submitted_by,
-            'submitted_at': budget.submitted_at.isoformat() if budget.submitted_at else None,
-            'approved_by': budget.approved_by,
-            'approved_by_name': approver.full_name if approver else None,
-            'approved_at': budget.approved_at.isoformat() if budget.approved_at else None,
-            'rejected_by': budget.rejected_by,
-            'rejected_by_name': rejecter.full_name if rejecter else None,
-            'rejected_at': budget.rejected_at.isoformat() if budget.rejected_at else None,
-            'rejection_reason': budget.rejection_reason,
-            'updated_at': budget.updated_at.isoformat() if budget.updated_at else None
-        }
-        
-        return jsonify(budget_data), 200
+        return jsonify(budget.to_dict()), 200
         
     except Exception as e:
         logger.error(f"Error fetching budget: {str(e)}")
@@ -449,10 +334,6 @@ def update_budget(budget_id):
             budget.budget_type = data['budget_type']
         if 'justification' in data:
             budget.justification = data['justification']
-        if 'start_date' in data and data['start_date']:
-            budget.start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00')).date()
-        if 'end_date' in data and data['end_date']:
-            budget.end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00')).date()
         
         # If submitting for approval, change status to PENDING
         if data.get('submit_for_approval', False):
@@ -466,11 +347,7 @@ def update_budget(budget_id):
         
         return jsonify({
             'message': 'Budget updated successfully',
-            'budget': {
-                'id': budget.id,
-                'name': budget.name,
-                'status': budget.status
-            }
+            'budget': budget.to_dict()
         }), 200
         
     except Exception as e:
@@ -483,7 +360,7 @@ def update_budget(budget_id):
 @treasurer_bp.route('/budgets/<int:budget_id>/submit', methods=['POST', 'OPTIONS'])
 @token_required
 def submit_budget_for_approval(budget_id):
-    """Submit a budget for approval (changes status from DRAFT to PENDING)"""
+    """Submit a budget for approval"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -502,7 +379,6 @@ def submit_budget_for_approval(budget_id):
         if budget.status != 'DRAFT':
             return jsonify({'error': f'Budget is already {budget.status.lower()}'}), 400
         
-        # Update status to PENDING
         budget.status = 'PENDING'
         budget.submitted_by = current_user.id if current_user else None
         budget.submitted_at = datetime.utcnow()
@@ -512,11 +388,7 @@ def submit_budget_for_approval(budget_id):
         
         return jsonify({
             'message': 'Budget submitted for approval successfully',
-            'budget': {
-                'id': budget.id,
-                'status': budget.status,
-                'submitted_at': budget.submitted_at.isoformat() if budget.submitted_at else None
-            }
+            'budget': budget.to_dict()
         }), 200
         
     except Exception as e:
@@ -526,17 +398,15 @@ def submit_budget_for_approval(budget_id):
         return jsonify({'error': str(e)}), 500
 
 
-@treasurer_bp.route('/budgets/<int:budget_id>/approve', methods=['POST', 'OPTIONS'])
+@treasurer_bp.route('/budgets/<int:budget_id>/delete', methods=['DELETE', 'OPTIONS'])
 @token_required
-def approve_budget_request(budget_id):
-    """Approve a budget"""
+def delete_budget(budget_id):
+    """Delete a budget"""
     if request.method == 'OPTIONS':
         return '', 200
     
     try:
         church_id = ensure_user_church(g.current_user)
-        current_user = get_current_user()
-        data = request.get_json() or {}
         
         budget = Budget.query.filter_by(
             id=budget_id,
@@ -546,93 +416,18 @@ def approve_budget_request(budget_id):
         if not budget:
             return jsonify({'error': 'Budget not found'}), 404
         
-        if budget.status != 'PENDING':
-            return jsonify({'error': f'Budget is already {budget.status.lower()}'}), 400
+        if budget.status != 'DRAFT':
+            return jsonify({'error': 'Only draft budgets can be deleted'}), 400
         
-        # Update budget
-        budget.status = 'APPROVED'
-        budget.approved_by = current_user.id if current_user else None
-        budget.approved_at = datetime.utcnow()
-        
-        # Optional: set approved amount
-        if data.get('amount'):
-            budget.approved_amount = data['amount']
-        
+        db.session.delete(budget)
         db.session.commit()
         
-        # Log audit
-        audit_log = AuditLog(
-            user_id=current_user.id if current_user else None,
-            action='APPROVE_BUDGET',
-            resource='budget',
-            resource_id=budget_id,
-            data={'amount': float(budget.amount)},
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
-        )
-        db.session.add(audit_log)
-        db.session.commit()
-        
-        return jsonify({'message': 'Budget approved successfully'}), 200
+        return jsonify({'message': 'Budget deleted successfully'}), 200
         
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error approving budget: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': f'Failed to approve budget: {str(e)}'}), 500
-
-
-@treasurer_bp.route('/budgets/<int:budget_id>/reject', methods=['POST', 'OPTIONS'])
-@token_required
-def reject_budget_request(budget_id):
-    """Reject a budget"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        church_id = ensure_user_church(g.current_user)
-        current_user = get_current_user()
-        data = request.get_json() or {}
-        reason = data.get('reason', 'No reason provided')
-        
-        budget = Budget.query.filter_by(
-            id=budget_id,
-            church_id=church_id
-        ).first()
-        
-        if not budget:
-            return jsonify({'error': 'Budget not found'}), 404
-        
-        if budget.status != 'PENDING':
-            return jsonify({'error': f'Budget is already {budget.status.lower()}'}), 400
-        
-        budget.status = 'REJECTED'
-        budget.rejected_by = current_user.id if current_user else None
-        budget.rejected_at = datetime.utcnow()
-        budget.rejection_reason = reason
-        
-        db.session.commit()
-        
-        # Log audit
-        audit_log = AuditLog(
-            user_id=current_user.id if current_user else None,
-            action='REJECT_BUDGET',
-            resource='budget',
-            resource_id=budget_id,
-            data={'reason': reason},
-            ip_address=request.remote_addr,
-            user_agent=request.user_agent.string if request.user_agent else None
-        )
-        db.session.add(audit_log)
-        db.session.commit()
-        
-        return jsonify({'message': 'Budget rejected'}), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error rejecting budget: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': f'Failed to reject budget: {str(e)}'}), 500
+        logger.error(f"Error deleting budget: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 # ==================== BUDGET VARIANCE ANALYSIS ====================
@@ -649,8 +444,9 @@ def get_budget_variance():
         year = request.args.get('year', datetime.now().year, type=int)
         month = request.args.get('month', type=int)
         budget_type = request.args.get('type', 'all')
+        department = request.args.get('department')
         
-        # Get all budgets for the year
+        # Query approved budgets
         query = Budget.query.filter_by(
             church_id=church_id,
             fiscal_year=year,
@@ -660,18 +456,22 @@ def get_budget_variance():
         if budget_type != 'all':
             query = query.filter_by(budget_type=budget_type.upper())
         
+        if department:
+            query = query.filter_by(department=department)
+        
         budgets = query.all()
         
         # Get actuals from journal entries
         from app.models import JournalEntry, JournalLine
+        from decimal import Decimal
         
         variance_data = []
-        total_budget = 0
-        total_actual = 0
-        total_variance = 0
+        total_budget = Decimal('0')
+        total_actual = Decimal('0')
+        total_variance = Decimal('0')
         
         for budget in budgets:
-            # Get actual amounts from journal entries
+            # Build actual query
             actual_query = db.session.query(func.sum(JournalLine.debit - JournalLine.credit)).join(
                 JournalEntry
             ).filter(
@@ -680,6 +480,11 @@ def get_budget_variance():
                 extract('year', JournalEntry.entry_date) == year
             )
             
+            # Filter by month if specified
+            if month:
+                actual_query = actual_query.filter(extract('month', JournalEntry.entry_date) == month)
+            
+            # Filter by account if budget has account association
             if budget.account_id:
                 actual_query = actual_query.filter(JournalLine.account_id == budget.account_id)
             elif budget.account_code:
@@ -690,36 +495,46 @@ def get_budget_variance():
                 if account:
                     actual_query = actual_query.filter(JournalLine.account_id == account.id)
             
-            actual = actual_query.scalar() or 0
+            actual_result = actual_query.scalar()
+            actual = Decimal(str(actual_result)) if actual_result is not None else Decimal('0')
+            
+            # Convert budget amount to Decimal
+            budget_amount = Decimal(str(budget.amount)) if budget.amount else Decimal('0')
             
             # Calculate variance
-            variance = actual - budget.amount
-            variance_percent = (variance / budget.amount * 100) if budget.amount > 0 else 0
+            variance = actual - budget_amount
+            variance_percent = float((variance / budget_amount * 100)) if budget_amount > 0 else 0
+            
+            # Determine if variance is favorable
+            is_favorable = False
+            if budget.budget_type == 'REVENUE' and variance > 0:
+                is_favorable = True
+            elif budget.budget_type == 'EXPENSE' and variance < 0:
+                is_favorable = True
             
             variance_data.append({
                 'id': budget.id,
                 'name': budget.name,
-                'account_code': budget.account_code,
-                'budget_type': budget.budget_type,
                 'department': budget.department,
-                'budget_amount': float(budget.amount),
+                'budget_type': budget.budget_type,
+                'budget_amount': float(budget_amount),
                 'actual_amount': float(actual),
                 'variance': float(variance),
                 'variance_percentage': round(variance_percent, 2),
-                'status': 'favorable' if (budget.budget_type == 'REVENUE' and variance > 0) or (budget.budget_type == 'EXPENSE' and variance < 0) else 'unfavorable'
+                'status': 'favorable' if is_favorable else 'unfavorable'
             })
             
-            total_budget += budget.amount
+            total_budget += budget_amount
             total_actual += actual
             total_variance += variance
         
         return jsonify({
             'variance_data': variance_data,
             'summary': {
-                'total_budget': round(total_budget, 2),
-                'total_actual': round(total_actual, 2),
-                'total_variance': round(total_variance, 2),
-                'variance_percentage': round((total_variance / total_budget * 100) if total_budget > 0 else 0, 2),
+                'total_budget': float(total_budget),
+                'total_actual': float(total_actual),
+                'total_variance': float(total_variance),
+                'variance_percentage': round(float(total_variance / total_budget * 100) if total_budget > 0 else 0, 2),
                 'favorable_count': len([v for v in variance_data if v['status'] == 'favorable']),
                 'unfavorable_count': len([v for v in variance_data if v['status'] == 'unfavorable'])
             },
@@ -731,253 +546,237 @@ def get_budget_variance():
         logger.error(f"Error getting budget variance: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
-# ==================== ALERTS ====================
-
-@treasurer_bp.route('/alerts', methods=['GET', 'OPTIONS'])
+    
+@treasurer_bp.route('/budget-variance/export', methods=['GET', 'OPTIONS'])
 @token_required
-def get_treasurer_alerts():
-    """Get treasurer alerts"""
+def export_budget_variance():
+    """Export budget variance report as CSV or PDF"""
     if request.method == 'OPTIONS':
         return '', 200
     
     try:
         church_id = ensure_user_church(g.current_user)
+        year = request.args.get('year', datetime.now().year, type=int)
+        month = request.args.get('month', type=int)
+        budget_type = request.args.get('type', 'all')
+        format_type = request.args.get('format', 'csv').lower()
         
-        alerts = []
-        alert_id = 1
+        # Get variance data (same logic as get_budget_variance)
+        from decimal import Decimal
+        from app.models import JournalEntry, JournalLine
         
-        # Check for pending budgets
-        pending_budgets = Budget.query.filter_by(
+        query = Budget.query.filter_by(
             church_id=church_id,
-            status='PENDING'
-        ).count()
+            fiscal_year=year,
+            status='APPROVED'
+        )
         
-        if pending_budgets > 0:
-            alerts.append({
-                'id': alert_id,
-                'type': 'warning',
-                'severity': 'medium',
-                'message': f'{pending_budgets} budget(s) awaiting your review',
-                'time': 'Now'
+        if budget_type != 'all':
+            query = query.filter_by(budget_type=budget_type.upper())
+        
+        budgets = query.all()
+        
+        # Build variance data
+        variance_data = []
+        total_budget = Decimal('0')
+        total_actual = Decimal('0')
+        
+        for budget in budgets:
+            # Build actual query
+            actual_query = db.session.query(func.sum(JournalLine.debit - JournalLine.credit)).join(
+                JournalEntry
+            ).filter(
+                JournalEntry.church_id == church_id,
+                JournalEntry.status == 'POSTED',
+                extract('year', JournalEntry.entry_date) == year
+            )
+            
+            if month:
+                actual_query = actual_query.filter(extract('month', JournalEntry.entry_date) == month)
+            
+            if budget.account_id:
+                actual_query = actual_query.filter(JournalLine.account_id == budget.account_id)
+            elif budget.account_code:
+                account = Account.query.filter_by(
+                    account_code=budget.account_code,
+                    church_id=church_id
+                ).first()
+                if account:
+                    actual_query = actual_query.filter(JournalLine.account_id == account.id)
+            
+            actual_result = actual_query.scalar()
+            actual = Decimal(str(actual_result)) if actual_result is not None else Decimal('0')
+            budget_amount = Decimal(str(budget.amount)) if budget.amount else Decimal('0')
+            
+            variance = actual - budget_amount
+            variance_percent = float((variance / budget_amount * 100)) if budget_amount > 0 else 0
+            
+            is_favorable = False
+            if budget.budget_type == 'REVENUE' and variance > 0:
+                is_favorable = True
+            elif budget.budget_type == 'EXPENSE' and variance < 0:
+                is_favorable = True
+            
+            variance_data.append({
+                'name': budget.name,
+                'department': budget.department or '-',
+                'budget_type': budget.budget_type,
+                'budget_amount': float(budget_amount),
+                'actual_amount': float(actual),
+                'variance': float(variance),
+                'variance_percentage': round(variance_percent, 2),
+                'status': 'favorable' if is_favorable else 'unfavorable'
             })
-            alert_id += 1
+            
+            total_budget += budget_amount
+            total_actual += actual
         
-        # Check for pending transactions
-        pending_transactions = Transaction.query.filter_by(
-            church_id=church_id,
-            status='PENDING'
-        ).count()
-        
-        if pending_transactions > 0:
-            alerts.append({
-                'id': alert_id,
-                'type': 'warning',
-                'severity': 'medium',
-                'message': f'{pending_transactions} transaction(s) awaiting approval',
-                'time': 'Now'
-            })
-            alert_id += 1
-        
-        # Check for old pending transactions
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-        
-        old_pending = Transaction.query.filter(
-            Transaction.church_id == church_id,
-            Transaction.status == 'PENDING',
-            Transaction.transaction_date <= thirty_days_ago
-        ).count()
-        
-        if old_pending > 0:
-            alerts.append({
-                'id': alert_id,
-                'type': 'critical',
-                'severity': 'high',
-                'message': f'{old_pending} transaction(s) pending for over 30 days',
-                'time': f'{thirty_days_ago.strftime("%b %d")}'
-            })
-            alert_id += 1
-        
-        # Check for low balance accounts
-        low_balance_accounts = Account.query.filter(
-            Account.church_id == church_id,
-            Account.current_balance < 1000,
-            Account.is_active == True
-        ).count()
-        
-        if low_balance_accounts > 0:
-            alerts.append({
-                'id': alert_id,
-                'type': 'info',
-                'severity': 'low',
-                'message': f'{low_balance_accounts} accounts have low balance',
-                'time': 'Today'
-            })
-            alert_id += 1
-        
-        # Budget utilization alert
-        total_budget = db.session.query(func.sum(Budget.amount)).filter(
-            Budget.church_id == church_id,
-            Budget.status == 'APPROVED'
-        ).scalar() or 0
-        
-        total_spent = db.session.query(func.sum(Transaction.amount)).filter(
-            Transaction.church_id == church_id,
-            Transaction.transaction_type == 'EXPENSE',
-            Transaction.status == 'POSTED'
-        ).scalar() or 0
-        
-        if total_budget > 0:
-            utilization = (total_spent / total_budget) * 100
-            if utilization > 85:
-                alerts.append({
-                    'id': alert_id,
-                    'type': 'warning',
-                    'severity': 'medium',
-                    'message': f'Budget utilization at {utilization:.1f}% - approaching limit',
-                    'time': 'Now'
-                })
-                alert_id += 1
-        
-        return jsonify({'alerts': alerts}), 200
-        
+        if format_type == 'csv':
+            return export_variance_csv(variance_data, year, month, budget_type)
+        elif format_type == 'pdf':
+            return export_variance_pdf(variance_data, year, month, budget_type)
+        else:
+            return jsonify({'error': 'Unsupported format'}), 400
+            
     except Exception as e:
-        logger.error(f"Error getting alerts: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'alerts': [], 'error': str(e)}), 200
-
-
-# ==================== PENDING ITEMS ====================
-
-@treasurer_bp.route('/pending-items', methods=['GET', 'OPTIONS'])
-@token_required
-def get_pending_items():
-    """Get all pending items requiring treasurer approval"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        church_id = ensure_user_church(g.current_user)
-        pending_items = []
-        
-        # Get pending budgets
-        pending_budgets = Budget.query.filter_by(
-            church_id=church_id,
-            status='PENDING'
-        ).order_by(Budget.created_at.desc()).limit(5).all()
-        
-        for budget in pending_budgets:
-            submitter = User.query.get(budget.created_by)
-            pending_items.append({
-                'id': budget.id,
-                'type': 'budget',
-                'title': budget.name,
-                'description': budget.description,
-                'amount': float(budget.amount),
-                'submittedBy': submitter.full_name if submitter else 'Unknown',
-                'date': budget.created_at.isoformat() if budget.created_at else None,
-                'department': budget.department
-            })
-        
-        # Get pending expense transactions
-        pending_expenses = Transaction.query.filter_by(
-            church_id=church_id,
-            transaction_type='EXPENSE',
-            status='PENDING'
-        ).order_by(Transaction.transaction_date.desc()).limit(5).all()
-        
-        for expense in pending_expenses:
-            creator = User.query.get(expense.created_by)
-            account = Account.query.get(expense.account_id)
-            pending_items.append({
-                'id': expense.id,
-                'type': 'expense',
-                'title': expense.description,
-                'description': expense.description,
-                'amount': float(expense.amount),
-                'submittedBy': creator.full_name if creator else 'Unknown',
-                'date': expense.transaction_date.isoformat(),
-                'account': account.name if account else 'Unknown',
-                'category': expense.category
-            })
-        
-        # Sort by date (most recent first)
-        pending_items.sort(key=lambda x: x.get('date', ''), reverse=True)
-        
-        return jsonify({'items': pending_items[:10]}), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting pending items: {str(e)}")
+        logger.error(f"Error exporting budget variance: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-# ==================== DEBUG ENDPOINT ====================
-
-@treasurer_bp.route('/debug', methods=['GET', 'OPTIONS'])
-@token_required
-def debug_treasurer():
-    """Debug endpoint to check model accessibility"""
-    if request.method == 'OPTIONS':
-        return '', 200
+def export_variance_csv(variance_data, year, month, budget_type):
+    """Export variance data as CSV"""
+    import csv
+    import io
     
-    try:
-        church_id = ensure_user_church(g.current_user)
-        
-        debug_info = {
-            'user': {
-                'id': g.current_user.id,
-                'church_id': church_id,
-                'role': g.current_user.role
-            },
-            'models': {}
-        }
-        
-        # Check Budget model
-        try:
-            budget_count = Budget.query.filter_by(church_id=church_id).count()
-            debug_info['models']['budget'] = {
-                'accessible': True,
-                'count': budget_count,
-                'error': None
-            }
-        except Exception as e:
-            debug_info['models']['budget'] = {
-                'accessible': False,
-                'error': str(e)
-            }
-        
-        # Check Transaction model
-        try:
-            transaction_count = Transaction.query.filter_by(church_id=church_id).count()
-            debug_info['models']['transaction'] = {
-                'accessible': True,
-                'count': transaction_count,
-                'error': None
-            }
-        except Exception as e:
-            debug_info['models']['transaction'] = {
-                'accessible': False,
-                'error': str(e)
-            }
-        
-        # Check Account model
-        try:
-            account_count = Account.query.filter_by(church_id=church_id).count()
-            debug_info['models']['account'] = {
-                'accessible': True,
-                'count': account_count,
-                'error': None
-            }
-        except Exception as e:
-            debug_info['models']['account'] = {
-                'accessible': False,
-                'error': str(e)
-            }
-        
-        return jsonify(debug_info), 200
-        
-    except Exception as e:
-        logger.error(f"Error in debug endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow(['Budget Variance Report'])
+    writer.writerow([f'Fiscal Year: {year}'])
+    writer.writerow([f'Month: {month if month else "Full Year"}'])
+    writer.writerow([f'Budget Type: {budget_type.upper()}'])
+    writer.writerow([])
+    
+    # Column headers
+    writer.writerow([
+        'Budget Name', 'Department', 'Type', 
+        'Budget Amount', 'Actual Amount', 'Variance', 'Variance %', 'Status'
+    ])
+    
+    # Data rows
+    for item in variance_data:
+        writer.writerow([
+            item['name'],
+            item['department'],
+            item['budget_type'],
+            f"{item['budget_amount']:.2f}",
+            f"{item['actual_amount']:.2f}",
+            f"{item['variance']:+.2f}",
+            f"{item['variance_percentage']:+.2f}%",
+            item['status'].upper()
+        ])
+    
+    output.seek(0)
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = f'attachment; filename=budget_variance_{year}_{month if month else "full"}.csv'
+    
+    return response
+
+
+def export_variance_pdf(variance_data, year, month, budget_type):
+    """Export variance data as PDF"""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from io import BytesIO
+    from datetime import datetime
+    
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=72,
+    )
+    
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Title style
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        alignment=TA_CENTER,
+        spaceAfter=12,
+        textColor=colors.HexColor('#1FB256')
+    )
+    
+    # Add title
+    elements.append(Paragraph('Budget Variance Report', title_style))
+    elements.append(Spacer(1, 6))
+    
+    # Add info
+    info_style = ParagraphStyle(
+        'Info',
+        parent=styles['Normal'],
+        fontSize=10,
+        alignment=TA_CENTER
+    )
+    elements.append(Paragraph(f'Fiscal Year: {year}', info_style))
+    elements.append(Paragraph(f'Month: {month if month else "Full Year"}', info_style))
+    elements.append(Paragraph(f'Budget Type: {budget_type.upper()}', info_style))
+    elements.append(Spacer(1, 20))
+    
+    # Create table data
+    table_data = [['Budget Name', 'Department', 'Type', 'Budget', 'Actual', 'Variance', '%', 'Status']]
+    
+    for item in variance_data:
+        table_data.append([
+            item['name'],
+            item['department'],
+            item['budget_type'],
+            f"{item['budget_amount']:,.2f}",
+            f"{item['actual_amount']:,.2f}",
+            f"{item['variance']:+,.2f}",
+            f"{item['variance_percentage']:+.2f}%",
+            item['status'].upper()
+        ])
+    
+    # Create table
+    table = Table(table_data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1FB256')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+    ]))
+    
+    elements.append(table)
+    elements.append(Spacer(1, 20))
+    
+    # Add footer
+    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    elements.append(Paragraph(footer_text, styles['Normal']))
+    
+    doc.build(elements)
+    
+    pdf = buffer.getvalue()
+    buffer.close()
+    
+    response = make_response(pdf)
+    response.headers['Content-Type'] = 'application/pdf'
+    response.headers['Content-Disposition'] = f'attachment; filename=budget_variance_{year}_{month if month else "full"}.pdf'
+    
+    return response
