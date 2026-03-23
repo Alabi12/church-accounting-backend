@@ -898,6 +898,500 @@ def toggle_account_status(account_id):
         logger.error(f"Error toggling account status: {str(e)}")
         return jsonify({'error': 'Failed to update account status'}), 500
 
+# ==================== JOURNAL ENTRY ENDPOINTS ====================
+
+@accounting_bp.route('/journal_entries', methods=['GET', 'OPTIONS'])
+@token_required
+def get_journal_entries():
+    """Get all journal entries with pagination and filters"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('perPage', 20, type=int)
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        status = request.args.get('status')
+        
+        from app.models import JournalEntry
+        
+        # Build query
+        query = JournalEntry.query.filter_by(church_id=church_id)
+        
+        # Apply filters
+        if start_date:
+            start = datetime.fromisoformat(start_date.replace('Z', '+00:00')).date()
+            query = query.filter(JournalEntry.entry_date >= start)
+        
+        if end_date:
+            end = datetime.fromisoformat(end_date.replace('Z', '+00:00')).date()
+            query = query.filter(JournalEntry.entry_date <= end)
+        
+        if status:
+            query = query.filter_by(status=status.upper())
+        
+        # Order by date descending
+        query = query.order_by(JournalEntry.entry_date.desc(), JournalEntry.created_at.desc())
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        # Format response
+        entries = []
+        for entry in paginated.items:
+            entries.append({
+                'id': entry.id,
+                'entry_number': entry.entry_number,
+                'entry_date': entry.entry_date.isoformat() if entry.entry_date else None,
+                'description': entry.description,
+                'reference': entry.reference,
+                'status': entry.status,
+                'total_debit': sum(float(line.debit) for line in entry.lines),
+                'total_credit': sum(float(line.credit) for line in entry.lines),
+                'created_at': entry.created_at.isoformat() if entry.created_at else None
+            })
+        
+        return jsonify({
+            'entries': entries,
+            'total': paginated.total,
+            'pages': paginated.pages,
+            'current_page': paginated.page,
+            'per_page': per_page
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting journal entries: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries/<int:entry_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_journal_entry(entry_id):
+    """Get a specific journal entry with its lines"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        from app.models import JournalEntry
+        
+        entry = JournalEntry.query.filter_by(
+            id=entry_id,
+            church_id=church_id
+        ).first()
+        
+        if not entry:
+            return jsonify({'error': 'Journal entry not found'}), 404
+        
+        # Use the to_dict method from your model
+        return jsonify(entry.to_dict()), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting journal entry: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries', methods=['POST', 'OPTIONS'])
+@token_required
+def create_journal_entry():
+    """Create a new journal entry"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        data = request.get_json()
+        
+        from app.models import JournalEntry, JournalLine, Account
+        
+        # Validate required fields
+        if not data.get('entry_date'):
+            return jsonify({'error': 'entry_date is required'}), 400
+        if not data.get('description'):
+            return jsonify({'error': 'description is required'}), 400
+        if not data.get('lines') or len(data.get('lines', [])) == 0:
+            return jsonify({'error': 'At least one journal line is required'}), 400
+        
+        # Parse entry date
+        entry_date = datetime.fromisoformat(data['entry_date'].replace('Z', '+00:00')).date()
+        
+        # Generate entry number
+        year = entry_date.year
+        month = entry_date.month
+        count = JournalEntry.query.filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_number.like(f'JE-{year}-{month:02d}%')
+        ).count() + 1
+        entry_number = f"JE-{year}-{month:02d}-{count:03d}"
+        
+        # Create journal entry
+        journal_entry = JournalEntry(
+            church_id=church_id,
+            entry_number=entry_number,
+            entry_date=entry_date,
+            description=data['description'],
+            reference=data.get('reference'),
+            notes=data.get('notes'),
+            status='DRAFT',
+            created_by=current_user.id if current_user else None
+        )
+        
+        db.session.add(journal_entry)
+        db.session.flush()
+        
+        # Create journal lines
+        total_debit = 0
+        total_credit = 0
+        
+        for line_data in data['lines']:
+            # Validate line
+            if not line_data.get('account_id'):
+                return jsonify({'error': 'account_id is required for each line'}), 400
+            
+            debit = float(line_data.get('debit', 0))
+            credit = float(line_data.get('credit', 0))
+            
+            if debit > 0 and credit > 0:
+                return jsonify({'error': 'A line cannot have both debit and credit'}), 400
+            if debit == 0 and credit == 0:
+                return jsonify({'error': 'Each line must have either debit or credit'}), 400
+            
+            total_debit += debit
+            total_credit += credit
+            
+            # Verify account exists
+            account = Account.query.filter_by(
+                id=line_data['account_id'],
+                church_id=church_id
+            ).first()
+            
+            if not account:
+                return jsonify({'error': f'Account {line_data["account_id"]} not found'}), 404
+            
+            line = JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=line_data['account_id'],
+                debit=debit,
+                credit=credit,
+                description=line_data.get('description')
+            )
+            db.session.add(line)
+        
+        # Check if balanced
+        if abs(total_debit - total_credit) > 0.01:
+            db.session.rollback()
+            return jsonify({
+                'error': 'Journal entry does not balance',
+                'total_debit': total_debit,
+                'total_credit': total_credit,
+                'difference': total_debit - total_credit
+            }), 400
+        
+        # Auto-submit for approval if requested
+        if data.get('submit_for_approval'):
+            journal_entry.status = 'PENDING'
+        
+        db.session.commit()
+        
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id if current_user else None,
+            action='CREATE_JOURNAL_ENTRY',
+            resource='journal_entry',
+            resource_id=journal_entry.id,
+            data={'entry_number': entry_number},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Journal entry created successfully',
+            'id': journal_entry.id,
+            'entry_number': entry_number
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating journal entry: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries/<int:entry_id>', methods=['PUT', 'OPTIONS'])
+@token_required
+def update_journal_entry(entry_id):
+    """Update a journal entry (only if DRAFT)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        data = request.get_json()
+        
+        from app.models import JournalEntry, JournalLine, Account
+        
+        entry = JournalEntry.query.filter_by(
+            id=entry_id,
+            church_id=church_id
+        ).first()
+        
+        if not entry:
+            return jsonify({'error': 'Journal entry not found'}), 404
+        
+        # Only allow editing of DRAFT entries
+        if entry.status != 'DRAFT':
+            return jsonify({'error': f'Cannot edit journal entry with status {entry.status}'}), 400
+        
+        # Update basic fields
+        if 'entry_date' in data:
+            entry.entry_date = datetime.fromisoformat(data['entry_date'].replace('Z', '+00:00')).date()
+        if 'description' in data:
+            entry.description = data['description']
+        if 'reference' in data:
+            entry.reference = data['reference']
+        if 'notes' in data:
+            entry.notes = data['notes']
+        
+        # Update lines if provided
+        if 'lines' in data:
+            # Remove existing lines
+            for line in entry.lines:
+                db.session.delete(line)
+            
+            # Create new lines
+            total_debit = 0
+            total_credit = 0
+            
+            for line_data in data['lines']:
+                if not line_data.get('account_id'):
+                    return jsonify({'error': 'account_id is required for each line'}), 400
+                
+                debit = float(line_data.get('debit', 0))
+                credit = float(line_data.get('credit', 0))
+                
+                if debit > 0 and credit > 0:
+                    return jsonify({'error': 'A line cannot have both debit and credit'}), 400
+                if debit == 0 and credit == 0:
+                    return jsonify({'error': 'Each line must have either debit or credit'}), 400
+                
+                total_debit += debit
+                total_credit += credit
+                
+                account = Account.query.filter_by(
+                    id=line_data['account_id'],
+                    church_id=church_id
+                ).first()
+                
+                if not account:
+                    return jsonify({'error': f'Account {line_data["account_id"]} not found'}), 404
+                
+                line = JournalLine(
+                    journal_entry_id=entry.id,
+                    account_id=line_data['account_id'],
+                    debit=debit,
+                    credit=credit,
+                    description=line_data.get('description')
+                )
+                db.session.add(line)
+            
+            # Check if balanced
+            if abs(total_debit - total_credit) > 0.01:
+                db.session.rollback()
+                return jsonify({
+                    'error': 'Journal entry does not balance',
+                    'total_debit': total_debit,
+                    'total_credit': total_credit,
+                    'difference': total_debit - total_credit
+                }), 400
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Journal entry updated successfully',
+            'id': entry.id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating journal entry: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries/<int:entry_id>/post', methods=['POST', 'OPTIONS'])
+@token_required
+def post_journal_entry(entry_id):
+    """Post a journal entry (change status to POSTED)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        
+        from app.models import JournalEntry
+        
+        entry = JournalEntry.query.filter_by(
+            id=entry_id,
+            church_id=church_id
+        ).first()
+        
+        if not entry:
+            return jsonify({'error': 'Journal entry not found'}), 404
+        
+        # Check if already posted
+        if entry.status == 'POSTED':
+            return jsonify({'error': 'Journal entry is already posted'}), 400
+        
+        if entry.status == 'VOID':
+            return jsonify({'error': 'Cannot post a voided journal entry'}), 400
+        
+        # Update status
+        entry.status = 'POSTED'
+        entry.posted_at = datetime.utcnow()
+        entry.posted_by = current_user.id if current_user else None
+        
+        db.session.commit()
+        
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id if current_user else None,
+            action='POST_JOURNAL_ENTRY',
+            resource='journal_entry',
+            resource_id=entry.id,
+            data={'entry_number': entry.entry_number},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Journal entry posted successfully',
+            'id': entry.id,
+            'status': entry.status
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error posting journal entry: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries/<int:entry_id>/void', methods=['POST', 'OPTIONS'])
+@token_required
+def void_journal_entry(entry_id):
+    """Void a journal entry"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        data = request.get_json() or {}
+        
+        from app.models import JournalEntry
+        
+        entry = JournalEntry.query.filter_by(
+            id=entry_id,
+            church_id=church_id
+        ).first()
+        
+        if not entry:
+            return jsonify({'error': 'Journal entry not found'}), 404
+        
+        # Cannot void posted entries
+        if entry.status == 'POSTED':
+            return jsonify({'error': 'Cannot void a posted journal entry. Create a reversing entry instead.'}), 400
+        
+        if entry.status == 'VOID':
+            return jsonify({'error': 'Journal entry is already voided'}), 400
+        
+        # Update status
+        entry.status = 'VOID'
+        entry.void_reason = data.get('reason', 'No reason provided')
+        entry.voided_at = datetime.utcnow()
+        entry.voided_by = current_user.id if current_user else None
+        
+        db.session.commit()
+        
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id if current_user else None,
+            action='VOID_JOURNAL_ENTRY',
+            resource='journal_entry',
+            resource_id=entry.id,
+            data={'entry_number': entry.entry_number, 'reason': entry.void_reason},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Journal entry voided successfully',
+            'id': entry.id,
+            'status': entry.status
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error voiding journal entry: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/journal_entries/<int:entry_id>/approve', methods=['POST', 'OPTIONS'])
+@token_required
+def approve_journal_entry(entry_id):
+    """Approve a journal entry (change status to APPROVED)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        
+        from app.models import JournalEntry
+        
+        entry = JournalEntry.query.filter_by(
+            id=entry_id,
+            church_id=church_id
+        ).first()
+        
+        if not entry:
+            return jsonify({'error': 'Journal entry not found'}), 404
+        
+        if entry.status != 'PENDING':
+            return jsonify({'error': f'Cannot approve journal entry with status {entry.status}'}), 400
+        
+        # Update status
+        entry.status = 'APPROVED'
+        entry.approved_at = datetime.utcnow()
+        entry.approved_by = current_user.id if current_user else None
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Journal entry approved successfully',
+            'id': entry.id,
+            'status': entry.status
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving journal entry: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # ==================== TRIAL BALANCE ENDPOINTS ====================
 
