@@ -133,7 +133,7 @@ class Budget(db.Model):
         }
 
 
-# Optional classes if needed
+# ADD THESE CLASSES IF THEY DON'T EXIST
 class BudgetCategory(db.Model):
     __tablename__ = 'budget_categories'
     
