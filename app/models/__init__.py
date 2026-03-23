@@ -12,7 +12,7 @@ from .budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
 from app.models.budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
 from .journal import JournalEntry, JournalLine
 from .approval import ApprovalWorkflow, ApprovalWorkflowStep, ApprovalRequest, Approval, ApprovalComment
-from .employee import Employee, TimeEntry
+# from .employee import Employee, TimeEntry
 from .payroll import PayrollRun, PayrollItem
 from .deduction import DeductionType, EmployeeDeduction
 from .leave import LeaveBalance, LeaveRequest
@@ -26,7 +26,7 @@ __all__ = [
     'Budget', 'BudgetCategory', 'BudgetComment', 'BudgetAttachment',
     'JournalEntry', 'JournalLine',
     'ApprovalWorkflow', 'ApprovalWorkflowStep', 'ApprovalRequest', 'Approval', 'ApprovalComment',
-    'Employee', 'TimeEntry',
+    # 'Employee', 'TimeEntry',
     'PayrollRun', 'PayrollItem',
     'DeductionType', 'EmployeeDeduction',
     'LeaveBalance', 'LeaveRequest',
