@@ -1,6 +1,4 @@
 # app/models/__init__.py
-# This file should ONLY import and export models
-
 from .enums import UserRole, Permission
 from .user import User
 from .church import Church
