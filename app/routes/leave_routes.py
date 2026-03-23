@@ -1,245 +1,433 @@
 # app/routes/leave_routes.py
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import LeaveRequest, LeaveBalance, LeaveType, Employee, User, AuditLog
+from app.models import Employee, LeaveBalance, LeaveRequest, User, AuditLog, Church
 from app.extensions import db
 from datetime import datetime, timedelta
-from decimal import Decimal
-import traceback
 import logging
+import traceback
 
 logger = logging.getLogger(__name__)
 leave_bp = Blueprint('leave', __name__)
 
-from app.routes.auth_routes import token_required
+
+# ==================== HELPER FUNCTIONS ====================
 
 def get_current_user():
+    """Get current user from JWT token or g"""
+    if hasattr(g, 'current_user') and g.current_user:
+        return g.current_user
+    
     try:
         user_id = get_jwt_identity()
         if user_id:
-            return User.query.get(int(user_id))
+            user = User.query.get(int(user_id))
+            if user:
+                g.current_user = user
+                return user
     except Exception as e:
         logger.warning(f"Error getting user from JWT: {e}")
+    
     return None
+
+
+def ensure_user_church(user=None):
+    """
+    Ensure we have a valid church_id.
+    Returns church_id or raises appropriate error.
+    """
+    try:
+        # Case 1: User object provided
+        if user and hasattr(user, 'church_id') and user.church_id:
+            return user.church_id
+        
+        # Case 2: Try to get current user from context
+        current_user = get_current_user()
+        if current_user and current_user.church_id:
+            return current_user.church_id
+        
+        # Case 3: Try to get default church
+        default_church = Church.query.first()
+        if default_church:
+            # If we have a user but no church_id, assign default
+            if current_user and not current_user.church_id:
+                current_user.church_id = default_church.id
+                db.session.add(current_user)
+                db.session.commit()
+                logger.info(f"Assigned default church {default_church.id} to user {current_user.id}")
+            return default_church.id
+        
+        # Case 4: For development, return a fallback
+        if current_app.debug:
+            logger.warning("Using fallback church_id=1 for development")
+            return 1
+            
+        raise ValueError("No church found in database")
+        
+    except Exception as e:
+        logger.error(f"Error in ensure_user_church: {str(e)}")
+        if current_app.debug:
+            return 1  # Fallback for development
+        raise
+
+
+# ==================== LEAVE BALANCES ====================
+
+@leave_bp.route('/balances', methods=['GET'])
+@jwt_required()
+def get_leave_balances():
+    """Get all leave balances"""
+    try:
+        church_id = ensure_user_church()
+        
+        # Build query
+        query = LeaveBalance.query.join(Employee).filter(
+            Employee.church_id == church_id
+        )
+        
+        # Filters
+        employee_id = request.args.get('employee_id', type=int)
+        if employee_id:
+            query = query.filter(LeaveBalance.employee_id == employee_id)
+        
+        year = request.args.get('year', datetime.now().year, type=int)
+        if year:
+            query = query.filter(LeaveBalance.year == year)
+        
+        leave_type = request.args.get('leave_type')
+        if leave_type:
+            query = query.filter(LeaveBalance.leave_type == leave_type)
+        
+        balances = query.all()
+        
+        # Enhance with employee names
+        result = []
+        for b in balances:
+            b_dict = b.to_dict()
+            if b.employee:
+                b_dict['employee_name'] = b.employee.full_name()
+            result.append(b_dict)
+        
+        return jsonify({
+            'balances': result
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching leave balances: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@leave_bp.route('/balances/initialize', methods=['POST'])
+@jwt_required()
+def initialize_leave_balances():
+    """Initialize leave balances for a new year"""
+    try:
+        church_id = ensure_user_church()
+        current_user = get_current_user()
+        
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+            
+        data = request.get_json() or {}
+        year = data.get('year', datetime.now().year)
+        
+        # Get all active employees
+        employees = Employee.query.filter_by(
+            church_id=church_id,
+            status='active'
+        ).all()
+        
+        created = []
+        existing = []
+        
+        leave_types = [
+            {'type': 'annual', 'entitlement': 20},
+            {'type': 'sick', 'entitlement': 15},
+            {'type': 'bereavement', 'entitlement': 5},
+            {'type': 'maternity', 'entitlement': 90},
+            {'type': 'paternity', 'entitlement': 5},
+            {'type': 'study', 'entitlement': 10},
+        ]
+        
+        for employee in employees:
+            for lt in leave_types:
+                # Check if balance exists
+                existing_balance = LeaveBalance.query.filter_by(
+                    employee_id=employee.id,
+                    leave_type=lt['type'],
+                    year=year
+                ).first()
+                
+                if existing_balance:
+                    existing.append({
+                        'employee_id': employee.id,
+                        'employee_name': employee.full_name(),
+                        'leave_type': lt['type'],
+                        'year': year
+                    })
+                    continue
+                
+                # Create new balance
+                balance = LeaveBalance(
+                    employee_id=employee.id,
+                    leave_type=lt['type'],
+                    year=year,
+                    annual_entitlement=lt['entitlement'],
+                    used=0,
+                    remaining=lt['entitlement']
+                )
+                
+                db.session.add(balance)
+                created.append({
+                    'employee_id': employee.id,
+                    'employee_name': employee.full_name(),
+                    'leave_type': lt['type'],
+                    'year': year
+                })
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': f'Created {len(created)} balances, {len(existing)} already existed',
+            'created': created,
+            'existing': existing
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error initializing leave balances: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 # ==================== LEAVE REQUESTS ====================
 
-@leave_bp.route('/requests', methods=['GET', 'OPTIONS'])
-@token_required
+@leave_bp.route('/requests', methods=['GET'])
+@jwt_required()
 def get_leave_requests():
-    """Get leave requests with filters"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+    """Get all leave requests"""
     try:
-        church_id = g.current_user.church_id
+        church_id = ensure_user_church()
+        
+        # Build query
+        query = LeaveRequest.query.join(Employee).filter(
+            Employee.church_id == church_id
+        )
+        
+        # Filters
         status = request.args.get('status')
-        employee_id = request.args.get('employee_id')
-        
-        query = LeaveRequest.query.join(Employee).filter(Employee.church_id == church_id)
-        
         if status and status != 'all':
-            query = query.filter_by(status=status)
+            query = query.filter(LeaveRequest.status == status)
+        
+        employee_id = request.args.get('employee_id', type=int)
         if employee_id:
-            query = query.filter_by(employee_id=employee_id)
+            query = query.filter(LeaveRequest.employee_id == employee_id)
+        
+        from_date = request.args.get('from_date')
+        if from_date:
+            from_date = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
+            query = query.filter(LeaveRequest.start_date >= from_date)
+        
+        to_date = request.args.get('to_date')
+        if to_date:
+            to_date = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
+            query = query.filter(LeaveRequest.end_date <= to_date)
         
         requests = query.order_by(LeaveRequest.created_at.desc()).all()
         
+        result = []
+        for r in requests:
+            r_dict = r.to_dict()
+            if r.employee:
+                r_dict['employee_name'] = r.employee.full_name()
+                r_dict['employee'] = {
+                    'id': r.employee.id,
+                    'name': r.employee.full_name(),
+                    'department': r.employee.department
+                }
+            result.append(r_dict)
+        
         return jsonify({
-            'requests': [req.to_dict() for req in requests],
-            'total': len(requests)
+            'requests': result
         }), 200
         
     except Exception as e:
-        logger.error(f"Error getting leave requests: {str(e)}")
+        logger.error(f"Error fetching leave requests: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests', methods=['POST', 'OPTIONS'])
-@token_required
+@leave_bp.route('/requests', methods=['POST'])
+@jwt_required()
 def create_leave_request():
-    """Create a new leave request (Employee)"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+    """Create a new leave request"""
     try:
+        print("[LEAVE] Creating leave request - POST request received")
+        
         current_user = get_current_user()
+        
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+            
         data = request.get_json()
+        print(f"[LEAVE] Request data: {data}")
         
-        # Get employee record for current user
-        employee = Employee.query.filter_by(
-            user_id=current_user.id,
-            church_id=g.current_user.church_id
-        ).first()
+        # Validate required fields
+        required_fields = ['employee_id', 'leave_type', 'start_date', 'end_date']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
         
-        if not employee:
-            return jsonify({'error': 'Employee record not found'}), 404
+        # Parse dates
+        start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00')).date()
+        end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00')).date()
         
         # Calculate days
-        start_date = datetime.fromisoformat(data['start_date']).date()
-        end_date = datetime.fromisoformat(data['end_date']).date()
-        days = (end_date - start_date).days + 1
+        days_requested = (end_date - start_date).days + 1
+        
+        if days_requested <= 0:
+            return jsonify({'error': 'End date must be after start date'}), 400
         
         # Check leave balance
-        leave_type = LeaveType.query.get(data['leave_type_id'])
         balance = LeaveBalance.query.filter_by(
-            employee_id=employee.id,
-            leave_type_id=data['leave_type_id'],
+            employee_id=data['employee_id'],
+            leave_type=data['leave_type'],
             year=start_date.year
         ).first()
         
-        if balance and days > balance.remaining_days:
-            return jsonify({'error': f'Insufficient leave balance. Available: {balance.remaining_days} days'}), 400
+        if not balance:
+            return jsonify({'error': 'Leave balance not found for this employee'}), 404
         
+        if balance.remaining < days_requested:
+            return jsonify({
+                'error': 'Insufficient leave balance',
+                'available': balance.remaining,
+                'requested': days_requested
+            }), 400
+        
+        # Create request
         leave_request = LeaveRequest(
-            employee_id=employee.id,
-            leave_type_id=data['leave_type_id'],
+            employee_id=data['employee_id'],
+            leave_type=data['leave_type'],
             start_date=start_date,
             end_date=end_date,
-            days_requested=days,
-            reason=data['reason'],
-            status='PENDING'
+            days_requested=days_requested,
+            reason=data.get('reason'),
+            status='pending'
         )
         
         db.session.add(leave_request)
         db.session.commit()
         
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id,
+            action='CREATE_LEAVE_REQUEST',
+            resource='leave_request',
+            resource_id=leave_request.id,
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        print(f"[LEAVE] Leave request created: {leave_request.id}")
+        
         return jsonify({
-            'message': 'Leave request submitted',
+            'message': 'Leave request submitted successfully',
             'request': leave_request.to_dict()
         }), 201
         
     except Exception as e:
         db.session.rollback()
         logger.error(f"Error creating leave request: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests/<int:request_id>/review', methods=['POST', 'OPTIONS'])
-@token_required
-def review_leave_request(request_id):
-    """Admin reviews leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+@leave_bp.route('/requests/<int:request_id>', methods=['GET'])
+@jwt_required()
+def get_leave_request(request_id):
+    """Get a specific leave request"""
     try:
-        current_user = get_current_user()
-        if current_user.role not in ['super_admin', 'admin']:
-            return jsonify({'error': 'Only admin can review leave requests'}), 403
+        church_id = ensure_user_church()
         
-        data = request.get_json()
+        leave_request = LeaveRequest.query.join(Employee).filter(
+            LeaveRequest.id == request_id,
+            Employee.church_id == church_id
+        ).first()
         
-        leave_request = LeaveRequest.query.get(request_id)
         if not leave_request:
             return jsonify({'error': 'Leave request not found'}), 404
         
-        if not leave_request.can_review():
-            return jsonify({'error': f'Cannot review request with status {leave_request.status}'}), 400
+        result = leave_request.to_dict()
+        if leave_request.employee:
+            result['employee_name'] = leave_request.employee.full_name()
+            result['employee'] = {
+                'id': leave_request.employee.id,
+                'name': leave_request.employee.full_name(),
+                'department': leave_request.employee.department
+            }
         
-        leave_request.status = 'REVIEWED'
-        leave_request.reviewed_by = current_user.id
-        leave_request.reviewed_at = datetime.utcnow()
-        leave_request.review_comments = data.get('comments')
-        
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Leave request reviewed',
-            'request': leave_request.to_dict()
-        }), 200
+        return jsonify(result), 200
         
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error reviewing leave: {str(e)}")
+        logger.error(f"Error fetching leave request: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-@leave_bp.route('/requests/<int:request_id>/recommend', methods=['POST', 'OPTIONS'])
-@token_required
-def recommend_leave_request(request_id):
-    """Admin recommends leave request to pastor"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        current_user = get_current_user()
-        if current_user.role not in ['super_admin', 'admin']:
-            return jsonify({'error': 'Only admin can recommend leave requests'}), 403
-        
-        data = request.get_json()
-        recommendation = data.get('recommendation', 'RECOMMEND')  # RECOMMEND or NOT_RECOMMEND
-        
-        leave_request = LeaveRequest.query.get(request_id)
-        if not leave_request:
-            return jsonify({'error': 'Leave request not found'}), 404
-        
-        if not leave_request.can_recommend():
-            return jsonify({'error': f'Cannot recommend request with status {leave_request.status}'}), 400
-        
-        if recommendation == 'RECOMMEND':
-            leave_request.status = 'RECOMMENDED'
-        else:
-            leave_request.status = 'REJECTED'
-            leave_request.rejected_by = current_user.id
-            leave_request.rejected_at = datetime.utcnow()
-            leave_request.rejection_reason = data.get('reason', 'Not recommended by admin')
-        
-        leave_request.recommended_by = current_user.id
-        leave_request.recommended_at = datetime.utcnow()
-        leave_request.recommendation = recommendation
-        leave_request.recommendation_comments = data.get('comments')
-        
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Leave request ' + ('recommended' if recommendation == 'RECOMMEND' else 'rejected'),
-            'request': leave_request.to_dict()
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error recommending leave: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@leave_bp.route('/requests/<int:request_id>/approve', methods=['POST', 'OPTIONS'])
-@token_required
+# In app/routes/leave_routes.py, update the approve_leave_request function
+@leave_bp.route('/requests/<int:request_id>/approve', methods=['POST'])
+@jwt_required()
 def approve_leave_request(request_id):
-    """Pastor approves leave request"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+    """Approve a leave request"""
     try:
         current_user = get_current_user()
-        if current_user.role not in ['super_admin', 'admin', 'pastor']:
-            return jsonify({'error': 'Only pastor can approve leave requests'}), 403
         
-        data = request.get_json()
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+        
+        # Check if user has permission to approve leave requests
+        # Check role instead of is_admin
+        allowed_roles = ['super_admin', 'admin', 'pastor', 'treasurer']
+        if current_user.role not in allowed_roles:
+            return jsonify({'error': 'Unauthorized to approve leave requests. Required role: super_admin, admin, pastor, or treasurer'}), 403
         
         leave_request = LeaveRequest.query.get(request_id)
+        
         if not leave_request:
             return jsonify({'error': 'Leave request not found'}), 404
         
-        if not leave_request.can_approve():
-            return jsonify({'error': f'Cannot approve request with status {leave_request.status}'}), 400
-        
-        leave_request.status = 'APPROVED'
-        leave_request.approved_by = current_user.id
-        leave_request.approved_at = datetime.utcnow()
-        leave_request.approval_comments = data.get('comments')
+        if leave_request.status != 'pending':
+            return jsonify({'error': f'Request is already {leave_request.status}'}), 400
         
         # Update leave balance
         balance = LeaveBalance.query.filter_by(
             employee_id=leave_request.employee_id,
-            leave_type_id=leave_request.leave_type_id,
+            leave_type=leave_request.leave_type,
             year=leave_request.start_date.year
         ).first()
         
-        if balance:
-            balance.used_days += leave_request.days_requested
-            balance.remaining_days = balance.total_days - balance.used_days
-            balance.updated_at = datetime.utcnow()
+        if not balance:
+            return jsonify({'error': 'Leave balance not found'}), 404
+        
+        if balance.remaining < leave_request.days_requested:
+            return jsonify({
+                'error': 'Insufficient leave balance',
+                'available': balance.remaining,
+                'requested': leave_request.days_requested
+            }), 400
+        
+        # Update balance
+        balance.used += leave_request.days_requested
+        balance.remaining -= leave_request.days_requested
+        
+        # Update request
+        leave_request.status = 'approved'
+        leave_request.approved_by = current_user.id
+        leave_request.approved_at = datetime.utcnow()
         
         db.session.commit()
         
@@ -250,137 +438,139 @@ def approve_leave_request(request_id):
         
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error approving leave: {str(e)}")
+        logger.error(f"Error approving leave request: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-
-@leave_bp.route('/requests/<int:request_id>/return', methods=['POST', 'OPTIONS'])
-@token_required
-def return_leave_request(request_id):
-    """Return leave request for corrections"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+@leave_bp.route('/requests/<int:request_id>/reject', methods=['POST'])
+@jwt_required()
+def reject_leave_request(request_id):
+    """Reject a leave request"""
     try:
         current_user = get_current_user()
-        data = request.get_json()
+        
+        if not current_user:
+            return jsonify({'error': 'User not found'}), 401
+        
+        # Check if user has permission to reject leave requests
+        allowed_roles = ['super_admin', 'admin', 'pastor', 'treasurer']
+        if current_user.role not in allowed_roles:
+            return jsonify({'error': 'Unauthorized to reject leave requests. Required role: super_admin, admin, pastor, or treasurer'}), 403
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.status != 'pending':
+            return jsonify({'error': f'Request is already {leave_request.status}'}), 400
+        
+        data = request.get_json() or {}
         reason = data.get('reason', 'No reason provided')
         
-        leave_request = LeaveRequest.query.get(request_id)
-        if not leave_request:
-            return jsonify({'error': 'Leave request not found'}), 404
-        
-        leave_request.status = 'RETURNED'
-        leave_request.returned_by = current_user.id
-        leave_request.returned_at = datetime.utcnow()
-        leave_request.return_reason = reason
+        leave_request.status = 'rejected'
+        leave_request.rejection_reason = reason
+        leave_request.approved_by = current_user.id
+        leave_request.approved_at = datetime.utcnow()
         
         db.session.commit()
         
         return jsonify({
-            'message': 'Leave request returned for corrections',
-            'request': leave_request.to_dict()
+            'message': 'Leave request rejected',
+            'reason': reason
         }), 200
         
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error returning leave: {str(e)}")
+        logger.error(f"Error rejecting leave request: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+# ==================== TEST ENDPOINT ====================
 
-
-@leave_bp.route('/requests/<int:request_id>/process-allowance', methods=['POST', 'OPTIONS'])
-@token_required
-def process_leave_allowance(request_id):
-    """Process leave allowance payment (Accountant)"""
+@leave_bp.route('/test', methods=['GET', 'OPTIONS'])
+def test_leave():
+    """Test endpoint to verify leave blueprint is working"""
     if request.method == 'OPTIONS':
         return '', 200
-    
+    return jsonify({
+        'message': 'Leave blueprint is working!',
+        'status': 'ok',
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200
+
+
+# ==================== LEAVE CALENDAR ====================
+
+@leave_bp.route('/calendar', methods=['GET'])
+@jwt_required()
+def get_leave_calendar():
+    """Get leave calendar for visualization"""
     try:
-        current_user = get_current_user()
-        if current_user.role not in ['super_admin', 'admin', 'accountant']:
-            return jsonify({'error': 'Only accountant can process leave allowances'}), 403
+        church_id = ensure_user_church()
+        year = request.args.get('year', datetime.now().year, type=int)
+        month = request.args.get('month', type=int)
         
-        data = request.get_json()
+        query = LeaveRequest.query.join(Employee).filter(
+            Employee.church_id == church_id,
+            LeaveRequest.status == 'approved'
+        )
         
-        leave_request = LeaveRequest.query.get(request_id)
-        if not leave_request:
-            return jsonify({'error': 'Leave request not found'}), 404
+        if month:
+            start_date = datetime(year, month, 1).date()
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1).date() - timedelta(days=1)
+            else:
+                end_date = datetime(year, month + 1, 1).date() - timedelta(days=1)
+            
+            query = query.filter(
+                LeaveRequest.start_date <= end_date,
+                LeaveRequest.end_date >= start_date
+            )
+        else:
+            start_date = datetime(year, 1, 1).date()
+            end_date = datetime(year, 12, 31).date()
+            query = query.filter(
+                LeaveRequest.start_date <= end_date,
+                LeaveRequest.end_date >= start_date
+            )
         
-        if not leave_request.can_process_allowance():
-            return jsonify({'error': 'Leave request cannot be processed for allowance'}), 400
+        requests = query.all()
         
-        # Calculate allowance (e.g., daily rate * days)
-        employee = Employee.query.get(leave_request.employee_id)
-        daily_rate = employee.basic_salary / 30 if employee.basic_salary else 0
-        allowance_amount = daily_rate * leave_request.days_requested
+        # Format for calendar display
+        events = []
+        for req in requests:
+            events.append({
+                'id': req.id,
+                'title': f"{req.employee.full_name()} - {req.leave_type}",
+                'start': req.start_date.isoformat(),
+                'end': (req.end_date + timedelta(days=1)).isoformat(),
+                'color': get_leave_color(req.leave_type),
+                'extendedProps': {
+                    'employee_id': req.employee_id,
+                    'employee_name': req.employee.full_name(),
+                    'leave_type': req.leave_type,
+                    'days': req.days_requested,
+                    'status': req.status
+                }
+            })
         
-        leave_request.allowance_processed = True
-        leave_request.allowance_processed_at = datetime.utcnow()
-        leave_request.allowance_amount = Decimal(str(allowance_amount))
-        
-        # Link to payroll for payment processing
-        if data.get('payroll_run_id'):
-            leave_request.payroll_run_id = data['payroll_run_id']
-        
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Leave allowance processed',
-            'request': leave_request.to_dict(),
-            'allowance_amount': float(allowance_amount)
-        }), 200
+        return jsonify(events), 200
         
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error processing leave allowance: {str(e)}")
+        logger.error(f"Error getting leave calendar: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-# ==================== LEAVE TYPES AND BALANCES ====================
-
-@leave_bp.route('/types', methods=['GET', 'OPTIONS'])
-@token_required
-def get_leave_types():
-    """Get all leave types"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        types = LeaveType.query.filter_by(is_active=True).all()
-        return jsonify({
-            'types': [t.to_dict() for t in types]
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting leave types: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@leave_bp.route('/balances', methods=['GET', 'OPTIONS'])
-@token_required
-def get_leave_balances():
-    """Get leave balances for current employee"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
-    try:
-        current_user = get_current_user()
-        employee = Employee.query.filter_by(
-            user_id=current_user.id,
-            church_id=g.current_user.church_id
-        ).first()
-        
-        if not employee:
-            return jsonify({'error': 'Employee record not found'}), 404
-        
-        balances = LeaveBalance.query.filter_by(
-            employee_id=employee.id
-        ).all()
-        
-        return jsonify({
-            'balances': [b.to_dict() for b in balances]
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting leave balances: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+def get_leave_color(leave_type):
+    """Get color for leave type in calendar"""
+    colors = {
+        'annual': '#3498db',
+        'sick': '#e74c3c',
+        'bereavement': '#95a5a6',
+        'maternity': '#9b59b6',
+        'paternity': '#3498db',
+        'study': '#f39c12',
+        'unpaid': '#2c3e50'
+    }
+    return colors.get(leave_type, '#3498db')

@@ -21,7 +21,7 @@ class Employee(db.Model):
     # Employment Details
     position = db.Column(db.String(100))
     department = db.Column(db.String(100))
-    employment_type = db.Column(db.String(50))  # Full-time, Part-time, Contract
+    employment_type = db.Column(db.String(50))
     hire_date = db.Column(db.Date)
     termination_date = db.Column(db.Date)
     is_active = db.Column(db.Boolean, default=True)
@@ -44,7 +44,7 @@ class Employee(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
     
-    # Relationships
+    # Relationships - use string references
     user = db.relationship('User', backref='employee')
     church = db.relationship('Church', backref='employees')
     
