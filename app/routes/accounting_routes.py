@@ -1499,6 +1499,7 @@ def get_trial_balance():
         logger.error(f"Error getting trial balance: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': 'Failed to get trial balance'}), 500
+
      
 # ==================== FINANCIAL STATEMENTS ENDPOINTS ====================
 
@@ -2559,6 +2560,99 @@ def export_as_pdf(statement_data, statement_type, start_date, end_date):
     
     return response
 
+
+# =================== VARIANCE ANALYSIS ==========================
+
+# app/routes/accounting_routes.py
+
+@accounting_bp.route('/financial-statements-with-budget', methods=['GET', 'OPTIONS'])
+@token_required
+def get_financial_statements_with_budget():
+    """Get financial statements with budget variance analysis"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        
+        if not start_date_str or not end_date_str:
+            return jsonify({'error': 'startDate and endDate are required'}), 400
+        
+        start = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+        end = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        year = start.year
+        
+        # Get income statement data
+        service = FinancialStatementService(church_id)
+        income_data = service.get_income_statement(start, end)
+        
+        # Get budget data
+        from app.models import Budget
+        
+        revenue_budgets = Budget.query.filter_by(
+            church_id=church_id,
+            fiscal_year=year,
+            budget_type='REVENUE',
+            status='APPROVED'
+        ).all()
+        
+        expense_budgets = Budget.query.filter_by(
+            church_id=church_id,
+            fiscal_year=year,
+            budget_type='EXPENSE',
+            status='APPROVED'
+        ).all()
+        
+        # Calculate total budgets
+        total_revenue_budget = sum(float(b.amount) for b in revenue_budgets)
+        total_expense_budget = sum(float(b.amount) for b in expense_budgets)
+        
+        # Get actual totals
+        total_revenue_actual = income_data['revenue']['total']
+        total_expense_actual = income_data['expenses']['total']
+        
+        # Calculate variances
+        revenue_variance = total_revenue_actual - total_revenue_budget
+        expense_variance = total_expense_actual - total_expense_budget
+        net_variance = (total_revenue_actual - total_expense_actual) - (total_revenue_budget - total_expense_budget)
+        
+        return jsonify({
+            'income_statement': income_data,
+            'budget_comparison': {
+                'revenue': {
+                    'budget': round(total_revenue_budget, 2),
+                    'actual': round(total_revenue_actual, 2),
+                    'variance': round(revenue_variance, 2),
+                    'variance_percentage': round((revenue_variance / total_revenue_budget * 100) if total_revenue_budget > 0 else 0, 2),
+                    'favorable': revenue_variance > 0
+                },
+                'expenses': {
+                    'budget': round(total_expense_budget, 2),
+                    'actual': round(total_expense_actual, 2),
+                    'variance': round(expense_variance, 2),
+                    'variance_percentage': round((expense_variance / total_expense_budget * 100) if total_expense_budget > 0 else 0, 2),
+                    'favorable': expense_variance < 0
+                },
+                'net': {
+                    'budget': round(total_revenue_budget - total_expense_budget, 2),
+                    'actual': round(total_revenue_actual - total_expense_actual, 2),
+                    'variance': round(net_variance, 2),
+                    'favorable': net_variance > 0
+                }
+            },
+            'period': {
+                'start': start.isoformat(),
+                'end': end.isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting financial statements with budget: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
 
 # ==================== BANK ACCOUNTS ENDPOINTS ====================
 

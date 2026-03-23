@@ -1,6 +1,4 @@
 # app/models/__init__.py
-# This file should ONLY import and export models
-
 from .enums import UserRole, Permission
 from .user import User
 from .church import Church
@@ -11,6 +9,7 @@ from .audit import AuditLog
 from .role import Role, PermissionModel, UserRole as UserRoleModel
 from .setting import Setting
 from .budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
+from app.models.budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
 from .journal import JournalEntry, JournalLine
 from .approval import ApprovalWorkflow, ApprovalWorkflowStep, ApprovalRequest, Approval, ApprovalComment
 from .employee import Employee, TimeEntry
