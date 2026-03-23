@@ -1623,6 +1623,34 @@ def debug_treasurer():
     
     return jsonify(debug_info), 200
 
+# ================= BUDGET =============================
+
+@treasurer_bp.route('/budgets/<int:budget_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_budget(budget_id):
+    """Get a single budget by ID"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        from app.models import Budget
+        
+        budget = Budget.query.filter_by(
+            id=budget_id,
+            church_id=church_id
+        ).first()
+        
+        if not budget:
+            return jsonify({'error': 'Budget not found'}), 404
+        
+        return jsonify(budget.to_dict()), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching budget: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 # ==================== BUDGET STATUS ====================
 
 @treasurer_bp.route('/budget-status', methods=['GET', 'OPTIONS'])
