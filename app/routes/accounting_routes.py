@@ -1039,7 +1039,6 @@ def create_journal_entry():
             entry_date=entry_date,
             description=data['description'],
             reference=data.get('reference'),
-            notes=data.get('notes'),
             status='DRAFT',
             created_by=current_user.id if current_user else None
         )
@@ -1160,8 +1159,6 @@ def update_journal_entry(entry_id):
             entry.description = data['description']
         if 'reference' in data:
             entry.reference = data['reference']
-        if 'notes' in data:
-            entry.notes = data['notes']
         
         # Update lines if provided
         if 'lines' in data:
@@ -1768,802 +1765,8 @@ def export_financial_statement():
         return jsonify({'error': 'Failed to export statement'}), 500
 
 
-def export_as_csv(statement_data, statement_type, start_date, end_date):
-    """Export statement as CSV"""
-    import csv
-    import io
-    
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Write header
-    writer.writerow([f"{statement_type.upper()} STATEMENT"])
-    writer.writerow([f"Period: {start_date} to {end_date}"])
-    writer.writerow([])
-    
-    if statement_type == 'receipt-payment':
-        # Opening Balances
-        writer.writerow(['OPENING BALANCES'])
-        writer.writerow(['Account Name', 'Amount (GHS)'])
-        
-        for acc in statement_data.get('openingBalances', {}).get('cashAccounts', []):
-            writer.writerow([f"Cash - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
-        
-        for acc in statement_data.get('openingBalances', {}).get('bankAccounts', []):
-            writer.writerow([f"Bank - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL OPENING BALANCE', f"{statement_data.get('openingBalances', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Receipts
-        writer.writerow(['RECEIPTS'])
-        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('receipts', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                writer.writerow([
-                    category,
-                    item.get('date', ''),
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL RECEIPTS', '', '', f"{statement_data.get('receipts', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Payments
-        writer.writerow(['PAYMENTS'])
-        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('payments', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                writer.writerow([
-                    category,
-                    item.get('date', ''),
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL PAYMENTS', '', '', f"{statement_data.get('payments', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        net_cash_flow = statement_data.get('receipts', {}).get('total', 0) - statement_data.get('payments', {}).get('total', 0)
-        writer.writerow(['SUMMARY'])
-        writer.writerow(['Net Cash Flow', f"{net_cash_flow:,.2f}"])
-        writer.writerow(['Closing Balance', f"{statement_data.get('closingBalances', {}).get('total', 0):,.2f}"])
-        
-    elif statement_type == 'income':
-        # Income
-        writer.writerow(['INCOME'])
-        writer.writerow(['Category', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                writer.writerow([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            writer.writerow([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-            writer.writerow([])
-        
-        writer.writerow(['TOTAL INCOME', f"{statement_data.get('revenue', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Expenses
-        writer.writerow(['EXPENSES'])
-        writer.writerow(['Category', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                writer.writerow([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            writer.writerow([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-            writer.writerow([])
-        
-        writer.writerow(['TOTAL EXPENSES', f"{statement_data.get('expenses', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        writer.writerow(['NET INCOME', f"{statement_data.get('net_income', 0):,.2f}"])
-    
-    elif statement_type == 'balance':
-        # Assets
-        writer.writerow(['ASSETS'])
-        writer.writerow(['Account', 'Amount (GHS)'])
-        
-        for asset in statement_data.get('assets', {}).get('current', []):
-            writer.writerow([f"Current - {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
-        for asset in statement_data.get('assets', {}).get('fixed', []):
-            writer.writerow([f"Fixed - {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
-        for asset in statement_data.get('assets', {}).get('other', []):
-            writer.writerow([f"Other - {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL ASSETS', f"{statement_data.get('assets', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Liabilities
-        writer.writerow(['LIABILITIES'])
-        writer.writerow(['Account', 'Amount (GHS)'])
-        
-        for liability in statement_data.get('liabilities', {}).get('current', []):
-            writer.writerow([f"Current - {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
-        for liability in statement_data.get('liabilities', {}).get('longTerm', []):
-            writer.writerow([f"Long-term - {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL LIABILITIES', f"{statement_data.get('liabilities', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Equity
-        writer.writerow(['EQUITY'])
-        writer.writerow(['Account', 'Amount (GHS)'])
-        
-        for equity in statement_data.get('equity', {}).get('accounts', []):
-            writer.writerow([equity.get('name', ''), f"{equity.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL EQUITY', f"{statement_data.get('equity', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        writer.writerow(['TOTAL LIABILITIES & EQUITY', f"{statement_data.get('liabilities', {}).get('total', 0) + statement_data.get('equity', {}).get('total', 0):,.2f}"])
-    
-    elif statement_type == 'cashflow':
-        # Operating
-        writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        
-        for item in statement_data.get('cashFlow', {}).get('operating', {}).get('items', []):
-            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['Net Cash from Operating Activities', f"{statement_data.get('cashFlow', {}).get('operating', {}).get('net', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Investing
-        writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        
-        for item in statement_data.get('cashFlow', {}).get('investing', {}).get('items', []):
-            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['Net Cash from Investing Activities', f"{statement_data.get('cashFlow', {}).get('investing', {}).get('net', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Financing
-        writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        
-        for item in statement_data.get('cashFlow', {}).get('financing', {}).get('items', []):
-            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
-        
-        writer.writerow(['Net Cash from Financing Activities', f"{statement_data.get('cashFlow', {}).get('financing', {}).get('net', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{statement_data.get('cashFlow', {}).get('netIncrease', 0):,.2f}"])
-        writer.writerow(['Cash at Beginning of Period', f"{statement_data.get('cashFlow', {}).get('beginningCash', 0):,.2f}"])
-        writer.writerow(['Cash at End of Period', f"{statement_data.get('cashFlow', {}).get('endingCash', 0):,.2f}"])
-    
-    output.seek(0)
-    
-    # Create response
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.csv'
-    
-    return response
 
 
-def export_as_pdf(statement_data, statement_type, start_date, end_date):
-    """Export statement as PDF using ReportLab"""
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from io import BytesIO
-    from datetime import datetime
-    
-    buffer = BytesIO()
-    
-    # Create the PDF document
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=72,
-    )
-    
-    # Container for the 'Flowable' objects
-    elements = []
-    
-    # Get styles
-    styles = getSampleStyleSheet()
-    
-    # Create custom styles
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        alignment=TA_CENTER,
-        spaceAfter=12,
-        textColor=colors.HexColor('#1FB256')
-    )
-    
-    subtitle_style = ParagraphStyle(
-        'CustomSubTitle',
-        parent=styles['Heading2'],
-        fontSize=14,
-        alignment=TA_CENTER,
-        spaceAfter=20,
-        textColor=colors.HexColor('#333333')
-    )
-    
-    header_style = ParagraphStyle(
-        'CustomHeader',
-        parent=styles['Heading3'],
-        fontSize=12,
-        alignment=TA_LEFT,
-        spaceAfter=6,
-        textColor=colors.HexColor('#1FB256'),
-        fontName='Helvetica-Bold'
-    )
-    
-    normal_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceAfter=4
-    )
-    
-    # Add title
-    title_text = statement_type.replace('-', ' ').upper()
-    elements.append(Paragraph(f'{title_text} STATEMENT', title_style))
-    elements.append(Spacer(1, 6))
-    
-    # Add period
-    period_text = f"Period: {start_date} to {end_date}"
-    elements.append(Paragraph(period_text, subtitle_style))
-    elements.append(Spacer(1, 20))
-    
-    if statement_type == 'receipt-payment':
-        # Opening Balances
-        elements.append(Paragraph('OPENING BALANCES', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Account Name', 'Amount (GHS)']]
-        for acc in statement_data.get('openingBalances', {}).get('cashAccounts', []):
-            data.append([f"Cash - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
-        for acc in statement_data.get('openingBalances', {}).get('bankAccounts', []):
-            data.append([f"Bank - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
-        data.append(['TOTAL OPENING BALANCE', f"{statement_data.get('openingBalances', {}).get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[300, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1FB256')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BACKGROUND', (0, 1), (-1, -2), colors.beige),
-            ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#E5F2FF')),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Receipts
-        elements.append(Paragraph('RECEIPTS', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Description', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('receipts', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                data.append([
-                    category,
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[150, 250, 100])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 10))
-        
-        # Payments
-        elements.append(Paragraph('PAYMENTS', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Description', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('payments', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                data.append([
-                    category,
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[150, 250, 100])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Summary
-        net_cash_flow = statement_data.get('receipts', {}).get('total', 0) - statement_data.get('payments', {}).get('total', 0)
-        data = [['Net Cash Flow', f"{net_cash_flow:,.2f}"]]
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        
-    elif statement_type == 'income':
-        # Income section
-        elements.append(Paragraph('INCOME', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                data.append([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            data.append([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Expenses section
-        elements.append(Paragraph('EXPENSES', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                data.append([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            data.append([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Summary
-        data = [['NET INCOME', f"{statement_data.get('net_income', 0):,.2f}"]]
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-    
-    # Add footer with generation date
-    elements.append(Spacer(1, 30))
-    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    elements.append(Paragraph(footer_text, styles['Normal']))
-    
-    # Build PDF
-    doc.build(elements)
-    
-    # Get the value of the BytesIO buffer
-    pdf = buffer.getvalue()
-    buffer.close()
-    
-    # Create response
-    response = make_response(pdf)
-    response.headers['Content-Type'] = 'application/pdf'
-    response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.pdf'
-    
-    return response
-
-def export_as_csv(statement_data, statement_type, start_date, end_date):
-    """Export statement as CSV"""
-    import csv
-    import io
-    
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    # Write header
-    writer.writerow([f"{statement_data['title']}"])
-    writer.writerow([f"Period: {start_date} to {end_date}"])
-    writer.writerow([])
-    
-    if statement_type == 'receipt-payment':
-        # Opening Balances
-        writer.writerow(['OPENING BALANCES'])
-        writer.writerow(['Account Name', 'Amount (GHS)'])
-        
-        for account in statement_data.get('opening_balances', {}).get('cash_accounts', []):
-            writer.writerow([f"Cash - {account.get('name', '')}", f"{account.get('opening_balance', 0):,.2f}"])
-        
-        for account in statement_data.get('opening_balances', {}).get('bank_accounts', []):
-            writer.writerow([f"Bank - {account.get('name', '')}", f"{account.get('opening_balance', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL OPENING BALANCE', f"{statement_data.get('opening_balances', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Receipts
-        writer.writerow(['RECEIPTS'])
-        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('receipts', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                writer.writerow([
-                    category,
-                    item.get('date', ''),
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL RECEIPTS', '', '', f"{statement_data.get('receipts', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Payments
-        writer.writerow(['PAYMENTS'])
-        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('payments', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                writer.writerow([
-                    category,
-                    item.get('date', ''),
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        writer.writerow(['TOTAL PAYMENTS', '', '', f"{statement_data.get('payments', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        net_cash_flow = statement_data.get('receipts', {}).get('total', 0) - statement_data.get('payments', {}).get('total', 0)
-        writer.writerow(['SUMMARY'])
-        writer.writerow(['Net Cash Flow', f"{net_cash_flow:,.2f}"])
-        writer.writerow(['Closing Balance', f"{statement_data.get('closing_balances', {}).get('total', 0):,.2f}"])
-        
-    elif statement_type == 'income':
-        # Income
-        writer.writerow(['INCOME'])
-        writer.writerow(['Category', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                writer.writerow([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            writer.writerow([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-            writer.writerow([])
-        
-        writer.writerow(['TOTAL INCOME', f"{statement_data.get('revenue', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Expenses
-        writer.writerow(['EXPENSES'])
-        writer.writerow(['Category', 'Amount (GHS)'])
-        
-        for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                writer.writerow([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            writer.writerow([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-            writer.writerow([])
-        
-        writer.writerow(['TOTAL EXPENSES', f"{statement_data.get('expenses', {}).get('total', 0):,.2f}"])
-        writer.writerow([])
-        
-        # Summary
-        writer.writerow(['NET INCOME', f"{statement_data.get('net_income', 0):,.2f}"])
-    
-    output.seek(0)
-    
-    # Create response
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.csv'
-    
-    return response
-
-
-def export_as_pdf(statement_data, statement_type, start_date, end_date):
-    """Export statement as PDF using ReportLab"""
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from io import BytesIO
-    from datetime import datetime
-    
-    buffer = BytesIO()
-    
-    # Create the PDF document
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=72,
-    )
-    
-    # Container for the 'Flowable' objects
-    elements = []
-    
-    # Get styles
-    styles = getSampleStyleSheet()
-    
-    # Create custom styles
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        alignment=TA_CENTER,
-        spaceAfter=12,
-        textColor=colors.HexColor('#1FB256')
-    )
-    
-    subtitle_style = ParagraphStyle(
-        'CustomSubTitle',
-        parent=styles['Heading2'],
-        fontSize=14,
-        alignment=TA_CENTER,
-        spaceAfter=20,
-        textColor=colors.HexColor('#333333')
-    )
-    
-    header_style = ParagraphStyle(
-        'CustomHeader',
-        parent=styles['Heading3'],
-        fontSize=12,
-        alignment=TA_LEFT,
-        spaceAfter=6,
-        textColor=colors.HexColor('#1FB256'),
-        fontName='Helvetica-Bold'
-    )
-    
-    normal_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceAfter=4
-    )
-    
-    # Add title
-    elements.append(Paragraph(statement_data.get('title', 'Financial Statement'), title_style))
-    elements.append(Spacer(1, 6))
-    
-    # Add period
-    period_text = f"Period: {start_date} to {end_date}"
-    elements.append(Paragraph(period_text, subtitle_style))
-    elements.append(Spacer(1, 20))
-    
-    if statement_type == 'receipt-payment':
-        # Opening Balances
-        elements.append(Paragraph('OPENING BALANCES', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Account Name', 'Amount (GHS)']]
-        for acc in statement_data.get('opening_balances', {}).get('cash_accounts', []):
-            data.append([f"Cash - {acc.get('name', '')}", f"{acc.get('opening_balance', 0):,.2f}"])
-        for acc in statement_data.get('opening_balances', {}).get('bank_accounts', []):
-            data.append([f"Bank - {acc.get('name', '')}", f"{acc.get('opening_balance', 0):,.2f}"])
-        data.append(['TOTAL OPENING BALANCE', f"{statement_data.get('opening_balances', {}).get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[300, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1FB256')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BACKGROUND', (0, 1), (-1, -2), colors.beige),
-            ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#E5F2FF')),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Receipts
-        elements.append(Paragraph('RECEIPTS', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Description', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('receipts', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                data.append([
-                    category,
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[150, 250, 100])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 10))
-        
-        # Payments
-        elements.append(Paragraph('PAYMENTS', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Description', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('payments', {}).get('categories', {}).items():
-            for item in cat_data.get('items', []):
-                data.append([
-                    category,
-                    item.get('description', ''),
-                    f"{item.get('amount', 0):,.2f}"
-                ])
-            data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[150, 250, 100])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Summary
-        data = [['Net Cash Flow', f"{statement_data.get('receipts', {}).get('total', 0) - statement_data.get('payments', {}).get('total', 0):,.2f}"]]
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        
-    elif statement_type == 'income':
-        # Income section
-        elements.append(Paragraph('INCOME', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                data.append([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            data.append([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Expenses section
-        elements.append(Paragraph('EXPENSES', header_style))
-        elements.append(Spacer(1, 6))
-        
-        data = [['Category', 'Amount (GHS)']]
-        for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
-            for account in cat_data.get('accounts', []):
-                data.append([f"  {account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
-            data.append([f"Total {category}", f"{cat_data.get('total', 0):,.2f}"])
-        
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Summary
-        data = [['NET INCOME', f"{statement_data.get('net_income', 0):,.2f}"]]
-        table = Table(data, colWidths=[350, 150])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        elements.append(table)
-    
-    # Add footer with generation date
-    elements.append(Spacer(1, 30))
-    footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    elements.append(Paragraph(footer_text, styles['Normal']))
-    
-    # Build PDF
-    doc.build(elements)
-    
-    # Get the value of the BytesIO buffer
-    pdf = buffer.getvalue()
-    buffer.close()
-    
-    # Create response
-    response = make_response(pdf)
-    response.headers['Content-Type'] = 'application/pdf'
-    response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.pdf'
-    
-    return response
-
-
-# =================== VARIANCE ANALYSIS ==========================
-
-# app/routes/accounting_routes.py
 
 @accounting_bp.route('/financial-statements-with-budget', methods=['GET', 'OPTIONS'])
 @token_required
@@ -2651,8 +1854,7 @@ def get_financial_statements_with_budget():
     except Exception as e:
         logger.error(f"Error getting financial statements with budget: {str(e)}")
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-    
+        return jsonify({'error': str(e)}), 500 
 
 # ==================== BANK ACCOUNTS ENDPOINTS ====================
 
@@ -3278,3 +2480,496 @@ def test_financial():
         'message': 'Financial statements route is working',
         'status': 'ok'
     }), 200
+# ==================== EXPORT FUNCTIONS ====================
+
+
+
+# ==================== COMPLETE EXPORT FUNCTIONS ====================
+
+def export_as_csv(statement_data, statement_type, start_date, end_date):
+    """Export statement as CSV - Handles all statement types"""
+    import csv
+    import io
+    from flask import make_response
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header
+    writer.writerow([f"{statement_type.upper()} STATEMENT"])
+    writer.writerow([f"Period: {start_date} to {end_date}"])
+    writer.writerow([])
+    
+    if statement_type == 'income':
+        # Income section
+        writer.writerow(['INCOME'])
+        writer.writerow(['Category', 'Account', 'Amount (GHS)'])
+        
+        for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
+            for account in cat_data.get('accounts', []):
+                writer.writerow([category, f"{account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
+            writer.writerow([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
+            writer.writerow([])
+        
+        writer.writerow(['TOTAL INCOME', '', f"{statement_data.get('revenue', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Expenses section
+        writer.writerow(['EXPENSES'])
+        writer.writerow(['Category', 'Account', 'Amount (GHS)'])
+        
+        for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
+            for account in cat_data.get('accounts', []):
+                writer.writerow([category, f"{account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
+            writer.writerow([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
+            writer.writerow([])
+        
+        writer.writerow(['TOTAL EXPENSES', '', f"{statement_data.get('expenses', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        writer.writerow(['NET INCOME', '', f"{statement_data.get('net_income', 0):,.2f}"])
+        
+    elif statement_type == 'balance':
+        # Assets
+        writer.writerow(['ASSETS'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for asset in statement_data.get('assets', {}).get('current', []):
+            writer.writerow([f"Current - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+        for asset in statement_data.get('assets', {}).get('fixed', []):
+            writer.writerow([f"Fixed - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL ASSETS', f"{statement_data.get('assets', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Liabilities
+        writer.writerow(['LIABILITIES'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for liability in statement_data.get('liabilities', {}).get('current', []):
+            writer.writerow([f"Current - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+        for liability in statement_data.get('liabilities', {}).get('longTerm', []):
+            writer.writerow([f"Long-term - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL LIABILITIES', f"{statement_data.get('liabilities', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Equity
+        writer.writerow(['EQUITY'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for equity in statement_data.get('equity', {}).get('accounts', []):
+            writer.writerow([f"{equity.get('code', '')} - {equity.get('name', '')}", f"{equity.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL EQUITY', f"{statement_data.get('equity', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        writer.writerow(['TOTAL LIABILITIES & EQUITY', f"{statement_data.get('liabilities', {}).get('total', 0) + statement_data.get('equity', {}).get('total', 0):,.2f}"])
+        
+    elif statement_type == 'receipt-payment':
+        # Opening Balances
+        writer.writerow(['OPENING BALANCES'])
+        writer.writerow(['Account Name', 'Amount (GHS)'])
+        
+        for acc in statement_data.get('openingBalances', {}).get('cashAccounts', []):
+            writer.writerow([f"Cash - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
+        for acc in statement_data.get('openingBalances', {}).get('bankAccounts', []):
+            writer.writerow([f"Bank - {acc.get('name', '')}", f"{acc.get('openingBalance', 0):,.2f}"])
+        writer.writerow(['TOTAL OPENING BALANCE', f"{statement_data.get('openingBalances', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Receipts
+        writer.writerow(['RECEIPTS'])
+        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
+        
+        for category, cat_data in statement_data.get('receipts', {}).get('categories', {}).items():
+            for item in cat_data.get('items', []):
+                writer.writerow([category, item.get('date', ''), item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
+            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
+        
+        writer.writerow(['TOTAL RECEIPTS', '', '', f"{statement_data.get('receipts', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Payments
+        writer.writerow(['PAYMENTS'])
+        writer.writerow(['Category', 'Date', 'Description', 'Amount (GHS)'])
+        
+        for category, cat_data in statement_data.get('payments', {}).get('categories', {}).items():
+            for item in cat_data.get('items', []):
+                writer.writerow([category, item.get('date', ''), item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
+            writer.writerow([f"Total {category}", '', '', f"{cat_data.get('total', 0):,.2f}"])
+        
+        writer.writerow(['TOTAL PAYMENTS', '', '', f"{statement_data.get('payments', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Summary
+        net_cash_flow = statement_data.get('receipts', {}).get('total', 0) - statement_data.get('payments', {}).get('total', 0)
+        writer.writerow(['SUMMARY'])
+        writer.writerow(['Net Cash Flow', f"{net_cash_flow:,.2f}"])
+        writer.writerow(['Closing Balance', f"{statement_data.get('closingBalances', {}).get('total', 0):,.2f}"])
+        
+    elif statement_type == 'cashflow':
+        # Operating Activities
+        writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
+        writer.writerow(['Description', 'Amount (GHS)'])
+        
+        for item in statement_data.get('operating', {}).get('items', []):
+            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
+        writer.writerow(['Net Cash from Operating Activities', f"{statement_data.get('operating', {}).get('net', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Investing Activities
+        writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
+        writer.writerow(['Description', 'Amount (GHS)'])
+        
+        for item in statement_data.get('investing', {}).get('items', []):
+            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
+        writer.writerow(['Net Cash from Investing Activities', f"{statement_data.get('investing', {}).get('net', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Financing Activities
+        writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
+        writer.writerow(['Description', 'Amount (GHS)'])
+        
+        for item in statement_data.get('financing', {}).get('items', []):
+            writer.writerow([item.get('description', ''), f"{item.get('amount', 0):,.2f}"])
+        writer.writerow(['Net Cash from Financing Activities', f"{statement_data.get('financing', {}).get('net', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Summary
+        writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{statement_data.get('netIncrease', 0):,.2f}"])
+        writer.writerow(['Cash at Beginning of Period', f"{statement_data.get('beginningCash', 0):,.2f}"])
+        writer.writerow(['Cash at End of Period', f"{statement_data.get('endingCash', 0):,.2f}"])
+    
+    output.seek(0)
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.csv'
+    
+    return response
+
+
+def export_as_pdf(statement_data, statement_type, start_date, end_date):
+    """Export statement as PDF - Handles all statement types"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from io import BytesIO
+        from datetime import datetime
+        from flask import make_response
+        
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=landscape(A4),
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72,
+        )
+        
+        elements = []
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            alignment=TA_CENTER,
+            spaceAfter=12,
+            textColor=colors.HexColor('#1FB256')
+        )
+        
+        elements.append(Paragraph(f'{statement_type.upper()} STATEMENT', title_style))
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(f'Period: {start_date} to {end_date}', styles['Normal']))
+        elements.append(Spacer(1, 20))
+        
+        if statement_type == 'income':
+            # Income section
+            income_data = [['Category', 'Account', 'Amount (GHS)']]
+            for category, cat_data in statement_data.get('revenue', {}).get('categories', {}).items():
+                for account in cat_data.get('accounts', []):
+                    income_data.append([category, f"{account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
+                income_data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
+            
+            table = Table(income_data, repeatRows=1)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 20))
+            
+            # Expenses section
+            expenses_data = [['Category', 'Account', 'Amount (GHS)']]
+            for category, cat_data in statement_data.get('expenses', {}).get('categories', {}).items():
+                for account in cat_data.get('accounts', []):
+                    expenses_data.append([category, f"{account.get('code', '')} - {account.get('name', '')}", f"{account.get('amount', 0):,.2f}"])
+                expenses_data.append([f"Total {category}", '', f"{cat_data.get('total', 0):,.2f}"])
+            
+            table = Table(expenses_data, repeatRows=1)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc3545')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 20))
+            
+            # Net Income
+            net_income_data = [['NET INCOME', f"{statement_data.get('net_income', 0):,.2f}"]]
+            table = Table(net_income_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            
+        elif statement_type == 'balance':
+            # Assets
+            assets_data = [['ASSETS', 'Amount (GHS)']]
+            for asset in statement_data.get('assets', {}).get('current', []):
+                assets_data.append([f"Current - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+            for asset in statement_data.get('assets', {}).get('fixed', []):
+                assets_data.append([f"Fixed - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+            assets_data.append(['TOTAL ASSETS', f"{statement_data.get('assets', {}).get('total', 0):,.2f}"])
+            
+            table = Table(assets_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#007bff')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 20))
+            
+            # Liabilities
+            liabilities_data = [['LIABILITIES', 'Amount (GHS)']]
+            for liability in statement_data.get('liabilities', {}).get('current', []):
+                liabilities_data.append([f"Current - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+            for liability in statement_data.get('liabilities', {}).get('longTerm', []):
+                liabilities_data.append([f"Long-term - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+            liabilities_data.append(['TOTAL LIABILITIES', f"{statement_data.get('liabilities', {}).get('total', 0):,.2f}"])
+            
+            table = Table(liabilities_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#fd7e14')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 20))
+            
+            # Equity
+            equity_data = [['EQUITY', 'Amount (GHS)']]
+            for equity in statement_data.get('equity', {}).get('accounts', []):
+                equity_data.append([f"{equity.get('code', '')} - {equity.get('name', '')}", f"{equity.get('amount', 0):,.2f}"])
+            equity_data.append(['TOTAL EQUITY', f"{statement_data.get('equity', {}).get('total', 0):,.2f}"])
+            
+            table = Table(equity_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6f42c1')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 20))
+            
+            # Total
+            total_data = [['TOTAL LIABILITIES & EQUITY', f"{statement_data.get('liabilities', {}).get('total', 0) + statement_data.get('equity', {}).get('total', 0):,.2f}"]]
+            table = Table(total_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#28a745')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            elements.append(table)
+        
+        doc.build(elements)
+        
+        pdf = buffer.getvalue()
+        buffer.close()
+        
+        response = make_response(pdf)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename={statement_type}_statement_{start_date}_to_{end_date}.pdf'
+        
+        return response
+        
+    except ImportError as e:
+        from flask import make_response
+        response = make_response("PDF export requires reportlab. Please install: pip install reportlab")
+        response.headers['Content-Type'] = 'text/plain'
+        return response
+    except Exception as e:
+        from flask import make_response
+        response = make_response(f"Error generating PDF: {str(e)}")
+        response.headers['Content-Type'] = 'text/plain'
+        return response
+
+# ==================== DIRECT EXPORT ENDPOINTS ====================
+
+@accounting_bp.route('/export/trial-balance', methods=['GET', 'OPTIONS'])
+@token_required
+def export_trial_balance():
+    """Export Trial Balance as CSV"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        as_at_date_str = request.args.get('asAt')
+        format_type = request.args.get('format', 'csv').lower()
+        
+        if not as_at_date_str:
+            as_at_date_str = datetime.now().date().isoformat()
+        
+        as_at_date = datetime.fromisoformat(as_at_date_str.replace('Z', '+00:00')).date()
+        
+        # Get trial balance data
+        accounts = Account.query.filter_by(
+            church_id=church_id,
+            is_active=True
+        ).order_by(Account.account_type, Account.account_code).all()
+        
+        import csv
+        import io
+        from flask import make_response
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        writer.writerow(['TRIAL BALANCE'])
+        writer.writerow([f'As at: {as_at_date_str}'])
+        writer.writerow([])
+        writer.writerow(['Account Code', 'Account Name', 'Account Type', 'Debit (GHS)', 'Credit (GHS)'])
+        
+        total_debits = 0
+        total_credits = 0
+        
+        for acc in accounts:
+            balance = float(acc.current_balance)
+            
+            if acc.account_type in ['ASSET', 'EXPENSE']:
+                debit = balance if balance > 0 else 0
+                credit = abs(balance) if balance < 0 else 0
+            else:
+                debit = abs(balance) if balance < 0 else 0
+                credit = balance if balance > 0 else 0
+            
+            total_debits += debit
+            total_credits += credit
+            
+            writer.writerow([
+                acc.account_code,
+                acc.name,
+                acc.account_type,
+                f"{debit:,.2f}" if debit > 0 else '-',
+                f"{credit:,.2f}" if credit > 0 else '-'
+            ])
+        
+        writer.writerow([])
+        writer.writerow(['TOTAL', '', '', f"{total_debits:,.2f}", f"{total_credits:,.2f}"])
+        writer.writerow(['STATUS', '', '', 'BALANCED' if abs(total_debits - total_credits) < 0.01 else 'NOT BALANCED'])
+        
+        output.seek(0)
+        response = make_response(output.getvalue())
+        response.headers['Content-Type'] = 'text/csv'
+        response.headers['Content-Disposition'] = f'attachment; filename=trial_balance_{as_at_date_str}.csv'
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error exporting trial balance: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/export/balance-sheet', methods=['GET', 'OPTIONS'])
+@token_required
+def export_balance_sheet():
+    """Export Balance Sheet as CSV"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        as_at_date_str = request.args.get('asAt')
+        format_type = request.args.get('format', 'csv').lower()
+        
+        if not as_at_date_str:
+            as_at_date_str = datetime.now().date().isoformat()
+        
+        as_at_date = datetime.fromisoformat(as_at_date_str.replace('Z', '+00:00')).date()
+        
+        # Get balance sheet data
+        service = FinancialStatementService(church_id)
+        data = service.get_balance_sheet(as_at_date)
+        
+        import csv
+        import io
+        from flask import make_response
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        writer.writerow(['BALANCE SHEET'])
+        writer.writerow([f'As at: {as_at_date_str}'])
+        writer.writerow([])
+        
+        # Assets
+        writer.writerow(['ASSETS'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for asset in data.get('assets', {}).get('current', []):
+            writer.writerow([f"Current - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+        for asset in data.get('assets', {}).get('fixed', []):
+            writer.writerow([f"Fixed - {asset.get('code', '')} {asset.get('name', '')}", f"{asset.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL ASSETS', f"{data.get('assets', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Liabilities
+        writer.writerow(['LIABILITIES'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for liability in data.get('liabilities', {}).get('current', []):
+            writer.writerow([f"Current - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+        for liability in data.get('liabilities', {}).get('longTerm', []):
+            writer.writerow([f"Long-term - {liability.get('code', '')} {liability.get('name', '')}", f"{liability.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL LIABILITIES', f"{data.get('liabilities', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        
+        # Equity
+        writer.writerow(['EQUITY'])
+        writer.writerow(['Account', 'Amount (GHS)'])
+        
+        for equity in data.get('equity', {}).get('accounts', []):
+            writer.writerow([f"{equity.get('code', '')} - {equity.get('name', '')}", f"{equity.get('amount', 0):,.2f}"])
+        writer.writerow(['TOTAL EQUITY', f"{data.get('equity', {}).get('total', 0):,.2f}"])
+        writer.writerow([])
+        writer.writerow(['TOTAL LIABILITIES & EQUITY', f"{data.get('liabilities', {}).get('total', 0) + data.get('equity', {}).get('total', 0):,.2f}"])
+        
+        output.seek(0)
+        response = make_response(output.getvalue())
+        response.headers['Content-Type'] = 'text/csv'
+        response.headers['Content-Disposition'] = f'attachment; filename=balance_sheet_{as_at_date_str}.csv'
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error exporting balance sheet: {str(e)}")
+        return jsonify({'error': str(e)}), 500
