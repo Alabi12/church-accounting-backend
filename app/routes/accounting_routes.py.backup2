@@ -270,8 +270,7 @@ def get_account_balance(account_id):
         ).limit(100).all()
         
         transaction_list = []
-        opening_balance = float(account.opening_balance) if account.opening_balance is not None else 0.0
-        running_balance = opening_balance
+        running_balance = float(account.opening_balance)
         
         # Sort by date ascending for running balance calculation
         transactions.reverse()
