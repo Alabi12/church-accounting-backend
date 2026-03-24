@@ -21,7 +21,7 @@ try:
     from reportlab.platypus import Image as RLImage
     from io import BytesIO
     REPORTLAB_AVAILABLE = True
-    print("✅ ReportLab imported successfully")
+    print("[OK] ReportLab imported successfully")
 except ImportError:
     REPORTLAB_AVAILABLE = False
     print("⚠️ ReportLab not available - PDF export will be disabled")

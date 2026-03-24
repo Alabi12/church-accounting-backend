@@ -268,26 +268,33 @@ def generate_payslip_pdf(payslip, payroll_item, employee, payroll_run):
         raise
 
 
-# [All your existing route functions remain exactly the same]
-# [Keep all the @payslip_bp.route decorators and functions as they are]
 
 @payslip_bp.route('/generate/<int:payroll_run_id>', methods=['POST', 'OPTIONS'])
 @jwt_required()
 def generate_payslips(payroll_run_id):
     """Generate payslips for all employees in a payroll run"""
-    # [Your existing code stays exactly the same]
     if request.method == 'OPTIONS':
         return '', 200
     
     try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        import io
+        import random
+        
+        print(f"[DEBUG] Starting payslip generation for run {payroll_run_id}")
+        
         # Check authorization
         current_user_id = get_jwt_identity()
+        print(f"[DEBUG] Current user: {current_user_id}")
         user = User.query.get(current_user_id)
         
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
         payroll_run = PayrollRun.query.get(payroll_run_id)
+        print(f"[DEBUG] Payroll run found: {payroll_run is not None}")
+        
         if not payroll_run:
             return jsonify({'error': 'Payroll run not found'}), 404
         
@@ -298,57 +305,164 @@ def generate_payslips(payroll_run_id):
         generated = []
         failed = []
         
-        for item in payroll_run.items:
+        # Get all payroll lines for this run
+        payroll_lines = PayrollLine.query.filter_by(payroll_run_id=payroll_run_id).all()
+        print(f"[DEBUG] Found {len(payroll_lines)} payroll lines")
+        
+        for idx, line in enumerate(payroll_lines):
             try:
-                # Check if payslip already exists
-                existing = Payslip.query.filter_by(payroll_item_id=item.id).first()
+                print(f"[DEBUG] Processing line {idx}, employee_id: {line.employee_id}")
+                
+                # Get employee
+                employee = Employee.query.get(line.employee_id)
+                if not employee:
+                    print(f"[DEBUG] Employee {line.employee_id} not found")
+                    failed.append({
+                        'employee_id': line.employee_id,
+                        'error': 'Employee not found'
+                    })
+                    continue
+                
+                print(f"[DEBUG] Employee found: {employee.first_name} {employee.last_name}")
+                
+                # Generate payslip number
+                import random
+                run_number_str = str(payroll_run.run_number)
+                print(f"[DEBUG] Run number: {run_number_str}")
+                
+                payslip_number = f"PS-{run_number_str}-{line.employee_id}-{random.randint(1000, 9999)}"
+                print(f"[DEBUG] Payslip number: {payslip_number}")
+                
+                # Calculate values
+                basic_salary = float(line.basic_salary) if line.basic_salary else 0
+                allowances = float(line.allowances) if line.allowances else 0
+                gross_pay = basic_salary + allowances
+                
+                # Simple tax calculation (5.5% SSNIT + 10% PAYE for demo)
+                ssnit = gross_pay * 0.055
+                tax = gross_pay * 0.10
+                total_deductions = ssnit + tax
+                net_pay = gross_pay - total_deductions
+                
+                # Create PDF
+                pdf_buffer = io.BytesIO()
+                c = canvas.Canvas(pdf_buffer, pagesize=letter)
+                
+                # Add content to PDF
+                y = 750
+                c.setFont("Helvetica-Bold", 16)
+                c.drawString(100, y, "PAYSLIP")
+                y -= 40
+                
+                c.setFont("Helvetica", 12)
+                c.drawString(100, y, f"Payslip Number: {payslip_number}")
+                y -= 25
+                c.drawString(100, y, f"Employee: {employee.first_name} {employee.last_name}")
+                y -= 25
+                c.drawString(100, y, f"Employee ID: {employee.employee_number if hasattr(employee, 'employee_number') else employee.id}")
+                y -= 25
+                c.drawString(100, y, f"Position: {employee.position or 'N/A'}")
+                y -= 25
+                c.drawString(100, y, f"Department: {employee.department or 'N/A'}")
+                y -= 40
+                
+                c.drawString(100, y, f"Pay Period: {payroll_run.period_start} to {payroll_run.period_end}")
+                y -= 25
+                c.drawString(100, y, f"Payment Date: {payroll_run.payment_date}")
+                y -= 40
+                
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(100, y, "EARNINGS:")
+                y -= 20
+                c.setFont("Helvetica", 12)
+                basic_formatted = "{:,.2f}".format(basic_salary)
+                c.drawString(120, y, f"Basic Salary: GHS {basic_formatted}")
+                y -= 20
+                allowances_formatted = "{:,.2f}".format(allowances)
+                c.drawString(120, y, f"Allowances: GHS {allowances_formatted}")
+                y -= 20
+                gross_formatted = "{:,.2f}".format(gross_pay)
+                c.drawString(120, y, f"Gross Pay: GHS {gross_formatted}")
+                y -= 40
+                
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(100, y, "DEDUCTIONS:")
+                y -= 20
+                c.setFont("Helvetica", 12)
+                # Format numbers first to avoid f-string formatting issues
+                ssnit_formatted = "{:,.2f}".format(ssnit)
+                c.drawString(120, y, f"SSNIT (5.5%): GHS {ssnit_formatted}")
+                y -= 20
+                tax_formatted = "{:,.2f}".format(tax)
+                c.drawString(120, y, f"PAYE Tax: GHS {tax_formatted}")
+                y -= 20
+                deductions_formatted = "{:,.2f}".format(total_deductions)
+                c.drawString(120, y, f"Total Deductions: GHS {deductions_formatted}")
+                y -= 40
+                
+                c.setFont("Helvetica-Bold", 14)
+                tax_formatted = "{:,.2f}".format(tax)
+                c.drawString(120, y, "PAYE Tax: GHS {}".format(tax_formatted))
+                y -= 40
+                
+                c.setFont("Helvetica", 10)
+                c.drawString(100, y, f"Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+                c.drawString(100, y-20, "This is a computer-generated document. No signature required.")
+                
+                c.save()
+                pdf_data = pdf_buffer.getvalue()
+                print(f"[DEBUG] PDF generated, size: {len(pdf_data)} bytes")
+                
+                # Check if payslip already exists for this employee and payroll run
+                existing = Payslip.query.filter_by(
+                    employee_id=line.employee_id,
+                    payroll_run_id=payroll_run_id
+                ).first()
+                
                 if existing:
+                    print(f"[DEBUG] Payslip already exists for employee {line.employee_id}")
                     generated.append({
-                        'employee_id': item.employee_id,
+                        'employee_id': line.employee_id,
+                        'employee_name': employee.full_name(),
                         'payslip_number': existing.payslip_number,
+                        'payslip_id': existing.id,
                         'status': 'already_exists'
                     })
                     continue
                 
-                # Generate payslip number
-                year = payroll_run.period_start.year
-                month = payroll_run.period_start.month
-                count = Payslip.query.filter(
-                    Payslip.payslip_number.like(f'PS-{year}-{month:02d}%')
-                ).count() + 1
-                
-                payslip_number = f"PS-{year}-{month:02d}-{item.employee_id:04d}-{count:02d}"
-                
-                # Create payslip record
+                # Create new payslip using SQLAlchemy model
                 payslip = Payslip(
-                    payroll_item_id=item.id,
-                    payslip_number=payslip_number
+                    payslip_number=payslip_number,
+                    employee_id=line.employee_id,
+                    payroll_run_id=payroll_run_id,
+                    payroll_line_id=line.id,
+                    pdf_data=pdf_data,
+                    created_at=datetime.utcnow()
                 )
                 
-                # Generate PDF
-                pdf_data = generate_payslip_pdf(payslip, item, item.employee, payroll_run)
-                payslip.pdf_data = pdf_data
-                payslip.pdf_generated_at = datetime.utcnow()
-                
                 db.session.add(payslip)
-                db.session.flush()
+                db.session.commit()
+                
+                print(f"[DEBUG] Insert successful, payslip ID: {payslip.id}")
                 
                 generated.append({
-                    'employee_id': item.employee_id,
-                    'employee_name': item.employee.full_name(),
+                    'employee_id': line.employee_id,
+                    'employee_name': employee.full_name(),
                     'payslip_number': payslip_number,
+                    'payslip_id': payslip.id,
                     'status': 'generated'
                 })
                 
             except Exception as e:
-                logger.error(f"Error generating payslip for employee {item.employee_id}: {str(e)}")
+                db.session.rollback()
+                error_msg = str(e)
+                print(f"[DEBUG] Error for employee {line.employee_id}: {error_msg}")
+                import traceback
                 traceback.print_exc()
                 failed.append({
-                    'employee_id': item.employee_id,
-                    'error': str(e)
+                    'employee_id': line.employee_id,
+                    'error': error_msg
                 })
-        
-        db.session.commit()
         
         return jsonify({
             'message': f'Generated {len(generated)} payslips',
@@ -357,24 +471,43 @@ def generate_payslips(payroll_run_id):
         }), 200
         
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error generating payslips: {str(e)}")
+        print(f"[DEBUG] Outer exception: {str(e)}")
+        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
+    
 @payslip_bp.route('/<int:payslip_id>/download', methods=['GET', 'OPTIONS'])
 @jwt_required()
 def download_payslip(payslip_id):
     """Download a specific payslip PDF"""
-    # [Your existing code stays exactly the same]
     if request.method == 'OPTIONS':
         return '', 200
     
     try:
-        payslip = Payslip.query.get(payslip_id)
-        if not payslip or not payslip.pdf_data:
-            return jsonify({'error': 'Payslip not found or PDF not generated'}), 404
+        # First, get the payslip and PDF data directly from database
+        from sqlalchemy import text
+        
+        # Get payslip data
+        payslip_result = db.session.execute(
+            text("SELECT id, payslip_number, employee_id FROM payslips WHERE id = :id"),
+            {'id': payslip_id}
+        ).fetchone()
+        
+        if not payslip_result:
+            return jsonify({'error': 'Payslip not found'}), 404
+        
+        payslip_id_val, payslip_number, employee_id = payslip_result
+        
+        # Get PDF data
+        pdf_result = db.session.execute(
+            text("SELECT pdf_data FROM payslips WHERE id = :id AND pdf_data IS NOT NULL"),
+            {'id': payslip_id}
+        ).fetchone()
+        
+        if not pdf_result or not pdf_result[0]:
+            return jsonify({'error': 'PDF not generated'}), 404
+        
+        pdf_data = pdf_result[0]
         
         # Check authorization
         current_user_id = get_jwt_identity()
@@ -383,28 +516,28 @@ def download_payslip(payslip_id):
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        # Allow if user is admin or the employee themselves
-        payroll_item = payslip.payroll_item
-        employee = payroll_item.employee
+        # Get employee to check if user is the employee
+        employee = Employee.query.get(employee_id)
         
-        # Check if user is admin or the employee (if employee has user_id)
-        is_employee = employee.user_id and employee.user_id == current_user_id
-        if not user.is_admin and not is_employee:
+        # Check if user is admin (role is super_admin or admin) or the employee themselves
+        is_admin = user.role in ['super_admin', 'admin']
+        is_employee = employee and employee.user_id and employee.user_id == current_user_id
+        
+        if not is_admin and not is_employee:
             return jsonify({'error': 'Unauthorized'}), 403
         
         # Return PDF file
         return send_file(
-            io.BytesIO(payslip.pdf_data),
+            io.BytesIO(pdf_data),
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f"payslip_{payslip.payslip_number}.pdf"
+            download_name=f"payslip_{payslip_number}.pdf"
         )
         
     except Exception as e:
         logger.error(f"Error downloading payslip: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
 
 @payslip_bp.route('/employee/<int:employee_id>', methods=['GET', 'OPTIONS'])
 @jwt_required()

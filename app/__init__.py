@@ -9,7 +9,7 @@ from app.extensions import db, jwt, mail, logger, migrate
 from app.config import config_by_name
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, text
 from flask import g
 
 # Import socketio from helper (handles production gracefully)
@@ -319,7 +319,8 @@ def create_app(config_name='development'):
     def health_check():
         db_status = 'healthy'
         try:
-            db.session.execute('SELECT 1').scalar()
+            # FIXED: Use text() for raw SQL queries
+            db.session.execute(text('SELECT 1')).scalar()
         except Exception as e:
             db_status = f'unhealthy: {str(e)}'
         

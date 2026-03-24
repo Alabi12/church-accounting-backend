@@ -1,0 +1,632 @@
+from flask import Blueprint, request, jsonify, g
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from app.models import (
+    Employee, PayrollRun, PayrollLine,
+    User, JournalEntry, JournalLine,
+    Account, AuditLog, Church
+)
+from app.extensions import db
+from datetime import datetime, timedelta
+from sqlalchemy import func, and_, extract, text
+import traceback
+import logging
+from decimal import Decimal
+
+from app.routes.auth_routes import token_required
+
+logger = logging.getLogger(__name__)
+payroll_bp = Blueprint('payroll', __name__)
+
+
+def get_current_user():
+    try:
+        user_id = get_jwt_identity()
+        if user_id:
+            return User.query.get(int(user_id))
+    except Exception as e:
+        logger.warning(f"Error getting user from JWT: {e}")
+    return None
+
+
+def ensure_user_church(user=None):
+    if user is None:
+        user = get_current_user()
+    
+    if not user:
+        default_church = Church.query.first()
+        if default_church:
+            return default_church.id
+        raise ValueError("No authenticated user and no default church found")
+    
+    if not user.church_id:
+        default_church = Church.query.first()
+        if default_church:
+            user.church_id = default_church.id
+            db.session.add(user)
+            db.session.commit()
+    return user.church_id
+
+
+# ==================== STEP 1: ADMIN INITIATES PAYROLL ====================
+
+@payroll_bp.route('/runs/initiate', methods=['POST', 'OPTIONS'])
+@token_required
+def initiate_payroll_run():
+    """Admin initiates a new payroll run"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        current_user = get_current_user()
+        if current_user.role not in ['super_admin', 'admin']:
+            return jsonify({'error': 'Only admin can initiate payroll'}), 403
+        
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+        payment_date = data.get('payment_date')
+        
+        if not period_start or not period_end or not payment_date:
+            return jsonify({'error': 'period_start, period_end, and payment_date are required'}), 400
+        
+        # Generate run number
+        year = datetime.now().year
+        month = datetime.now().month
+        count = PayrollRun.query.filter(
+            PayrollRun.run_number.like(f'PR-{year}-{month:02d}%')
+        ).count() + 1
+        run_number = f"PR-{year}-{month:02d}-{count:03d}"
+        
+        # Create payroll run with INITIATED status
+        payroll_run = PayrollRun(
+            church_id=church_id,
+            run_number=run_number,
+            period_start=datetime.fromisoformat(period_start.replace('Z', '+00:00')).date(),
+            period_end=datetime.fromisoformat(period_end.replace('Z', '+00:00')).date(),
+            payment_date=datetime.fromisoformat(payment_date.replace('Z', '+00:00')).date(),
+            status='INITIATED',
+            initiated_by=current_user.id,
+            initiated_at=datetime.utcnow()
+        )
+        
+        db.session.add(payroll_run)
+        db.session.flush()
+        
+        # Add all active employees to this payroll run (without calculations)
+        employees = Employee.query.filter_by(
+            church_id=church_id,
+            is_active=True
+        ).all()
+        
+        for emp in employees:
+            line = PayrollLine(
+                payroll_run_id=payroll_run.id,
+                employee_id=emp.id,
+                basic_salary=float(emp.basic_salary) if emp.basic_salary else 0,
+                allowances=float(emp.allowances) if emp.allowances else 0
+            )
+            db.session.add(line)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll run initiated successfully',
+            'run': payroll_run.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error initiating payroll run: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== STEP 2: ACCOUNTANT CALCULATES PAYROLL ====================
+
+@payroll_bp.route('/runs/<int:run_id>/calculate', methods=['POST', 'OPTIONS'])
+@token_required
+def calculate_payroll_run(run_id):
+    """Accountant calculates payroll with statutory deductions"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        current_user = get_current_user()
+        if current_user.role not in ['super_admin', 'admin', 'accountant']:
+            return jsonify({'error': 'Only accountant can calculate payroll'}), 403
+        
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json() or {}
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        if payroll_run.status != 'INITIATED':
+            return jsonify({'error': f'Cannot calculate payroll with status {payroll_run.status}. Must be INITIATED.'}), 400
+        
+        total_gross = 0
+        total_deductions = 0
+        total_net = 0
+        
+        for line in payroll_run.lines:
+            # Calculate gross pay
+            gross = line.basic_salary + line.allowances + line.overtime + line.bonus + line.leave_payment
+            
+            # Calculate deductions
+            ssnit = gross * Decimal('0.055')
+            provident = gross * Decimal('0.05')
+            paye = gross * Decimal('0.1') if gross > 400 else 0
+            
+            deductions = ssnit + provident + paye + line.other_deductions
+            net = gross - deductions
+            
+            # Update line
+            line.gross_earnings = gross
+            line.paye_tax = paye
+            line.ssnit_employee = ssnit
+            line.provident_fund = provident
+            line.total_deductions = deductions
+            line.net_pay = net
+            
+            total_gross += gross
+            total_deductions += deductions
+            total_net += net
+        
+        # Update payroll run
+        payroll_run.gross_pay = total_gross
+        payroll_run.total_deductions = total_deductions
+        payroll_run.net_pay = total_net
+        payroll_run.status = 'CALCULATED'
+        payroll_run.calculated_by = current_user.id
+        payroll_run.calculated_at = datetime.utcnow()
+        payroll_run.calculation_notes = data.get('notes')
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll calculated successfully',
+            'run': payroll_run.to_dict(),
+            'summary': {
+                'total_gross': float(total_gross),
+                'total_deductions': float(total_deductions),
+                'total_net': float(total_net)
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error calculating payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== STEP 3: TREASURER REVIEWS PAYROLL ====================
+
+@payroll_bp.route('/runs/<int:run_id>/review', methods=['POST', 'OPTIONS'])
+@token_required
+def review_payroll_run(run_id):
+    """Treasurer reviews calculated payroll"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        current_user = get_current_user()
+        if current_user.role not in ['super_admin', 'admin', 'treasurer']:
+            return jsonify({'error': 'Only treasurer can review payroll'}), 403
+        
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json() or {}
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        if payroll_run.status != 'CALCULATED':
+            return jsonify({'error': f'Cannot review payroll with status {payroll_run.status}. Must be CALCULATED.'}), 400
+        
+        payroll_run.status = 'REVIEWED'
+        payroll_run.reviewed_by = current_user.id
+        payroll_run.reviewed_at = datetime.utcnow()
+        payroll_run.review_comments = data.get('comments')
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll reviewed successfully',
+            'run': payroll_run.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error reviewing payroll: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== STEP 4: TREASURER APPROVES PAYROLL ====================
+
+@payroll_bp.route('/runs/<int:run_id>/approve', methods=['POST', 'OPTIONS'])
+@token_required
+def approve_payroll_run(run_id):
+    """Treasurer approves payroll after review"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        current_user = get_current_user()
+        if current_user.role not in ['super_admin', 'admin', 'treasurer']:
+            return jsonify({'error': 'Only treasurer can approve payroll'}), 403
+        
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json() or {}
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        if payroll_run.status != 'REVIEWED':
+            return jsonify({'error': f'Cannot approve payroll with status {payroll_run.status}. Must be REVIEWED.'}), 400
+        
+        payroll_run.status = 'APPROVED'
+        payroll_run.approved_by = current_user.id
+        payroll_run.approved_at = datetime.utcnow()
+        payroll_run.approval_comments = data.get('comments')
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll approved successfully',
+            'run': payroll_run.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving payroll: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== STEP 5: ACCOUNTANT PROCESSES PAYMENT ====================
+
+@payroll_bp.route('/runs/<int:run_id>/process', methods=['POST', 'OPTIONS'])
+@token_required
+def process_payroll_payment(run_id):
+    """Accountant processes payment and posts to ledger"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        current_user = get_current_user()
+        if current_user.role not in ['super_admin', 'admin', 'accountant']:
+            return jsonify({'error': 'Only accountant can process payroll payment'}), 403
+        
+        church_id = ensure_user_church(g.current_user)
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        if payroll_run.status != 'APPROVED':
+            return jsonify({'error': f'Cannot process payroll with status {payroll_run.status}. Must be APPROVED.'}), 400
+        
+        # Create journal entry
+        year = datetime.now().year
+        month = datetime.now().month
+        count = JournalEntry.query.filter(
+            JournalEntry.entry_number.like(f'JE-PR-{year}-{month:02d}%')
+        ).count() + 1
+        entry_number = f"JE-PR-{year}-{month:02d}-{count:03d}"
+        
+        # Get or create accounts
+        salary_expense = Account.query.filter_by(church_id=church_id, account_code='5100').first()
+        if not salary_expense:
+            salary_expense = Account(
+                church_id=church_id, account_code='5100', name='Salary Expense',
+                display_name='Salaries', account_type='EXPENSE', category='Staff Costs',
+                normal_balance='debit', is_active=True
+            )
+            db.session.add(salary_expense)
+            db.session.flush()
+        
+        ssnit_payable = Account.query.filter_by(church_id=church_id, account_code='2110').first()
+        if not ssnit_payable:
+            ssnit_payable = Account(
+                church_id=church_id, account_code='2110', name='SSNIT Payable',
+                display_name='SSNIT Payable', account_type='LIABILITY', category='Payables',
+                normal_balance='credit', is_active=True
+            )
+            db.session.add(ssnit_payable)
+            db.session.flush()
+        
+        provident_payable = Account.query.filter_by(church_id=church_id, account_code='2120').first()
+        if not provident_payable:
+            provident_payable = Account(
+                church_id=church_id, account_code='2120', name='Provident Fund Payable',
+                display_name='Provident Fund Payable', account_type='LIABILITY', category='Payables',
+                normal_balance='credit', is_active=True
+            )
+            db.session.add(provident_payable)
+            db.session.flush()
+        
+        paye_payable = Account.query.filter_by(church_id=church_id, account_code='2130').first()
+        if not paye_payable:
+            paye_payable = Account(
+                church_id=church_id, account_code='2130', name='PAYE Payable',
+                display_name='PAYE Payable', account_type='LIABILITY', category='Payables',
+                normal_balance='credit', is_active=True
+            )
+            db.session.add(paye_payable)
+            db.session.flush()
+        
+        bank_account = Account.query.filter_by(church_id=church_id, account_code='1010').first()
+        if not bank_account:
+            bank_account = Account(
+                church_id=church_id, account_code='1010', name='Cash in Hand',
+                display_name='Cash', account_type='ASSET', category='Current Assets',
+                normal_balance='debit', is_active=True
+            )
+            db.session.add(bank_account)
+            db.session.flush()
+        
+        # Create journal entry
+        journal_entry = JournalEntry(
+            church_id=church_id,
+            entry_number=entry_number,
+            entry_date=payroll_run.payment_date,
+            description=f"Payroll for period {payroll_run.period_start} to {payroll_run.period_end}",
+            status='POSTED',
+            created_by=current_user.id,
+            posted_by=current_user.id,
+            posted_at=datetime.utcnow()
+        )
+        db.session.add(journal_entry)
+        db.session.flush()
+        
+        # Calculate totals from lines
+        total_ssnit = sum(float(line.ssnit_employee) for line in payroll_run.lines)
+        total_provident = sum(float(line.provident_fund) for line in payroll_run.lines)
+        total_paye = sum(float(line.paye_tax) for line in payroll_run.lines)
+        
+        # Add journal lines
+        db.session.add(JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=salary_expense.id,
+            debit=payroll_run.gross_pay,
+            credit=0,
+            description="Gross salary expense"
+        ))
+        
+        if total_ssnit > 0:
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=ssnit_payable.id,
+                debit=0,
+                credit=total_ssnit,
+                description="SSNIT contribution payable"
+            ))
+        
+        if total_provident > 0:
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=provident_payable.id,
+                debit=0,
+                credit=total_provident,
+                description="Provident fund payable"
+            ))
+        
+        if total_paye > 0:
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=paye_payable.id,
+                debit=0,
+                credit=total_paye,
+                description="PAYE tax payable"
+            ))
+        
+        db.session.add(JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=bank_account.id,
+            debit=0,
+            credit=payroll_run.net_pay,
+            description="Net salary payment"
+        ))
+        
+        # Update payroll run
+        payroll_run.status = 'PROCESSED'
+        payroll_run.processed_by = current_user.id
+        payroll_run.processed_at = datetime.utcnow()
+        payroll_run.journal_entry_id = journal_entry.id
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll processed and posted to ledger',
+            'run': payroll_run.to_dict(),
+            'journal_entry_id': journal_entry.id,
+            'journal_entry_number': entry_number
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error processing payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== HELPER ENDPOINTS ====================
+
+@payroll_bp.route('/runs', methods=['GET', 'OPTIONS'])
+@token_required
+def get_payroll_runs():
+    """Get all payroll runs with filters"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        status = request.args.get('status')
+        
+        query = PayrollRun.query.filter_by(church_id=church_id)
+        
+        if status:
+            query = query.filter_by(status=status.upper())
+        
+        runs = query.order_by(PayrollRun.created_at.desc()).all()
+        
+        return jsonify({
+            'runs': [run.to_dict() for run in runs],
+            'total': len(runs)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payroll runs: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/runs/<int:run_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_payroll_run(run_id):
+    """Get a specific payroll run"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        return jsonify(payroll_run.to_dict()), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payroll run: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/runs/<int:run_id>/lines', methods=['GET', 'OPTIONS'])
+@token_required
+def get_payroll_lines(run_id):
+    """Get payroll lines for a run"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        lines = [line.to_dict() for line in payroll_run.lines]
+        
+        return jsonify({
+            'lines': lines,
+            'total': len(lines)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payroll lines: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/calculate-preview', methods=['POST', 'OPTIONS'])
+@token_required
+def preview_payroll_calculation():
+    """Preview payroll calculation without saving"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json() or {}
+        
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+        
+        if not period_start or not period_end:
+            return jsonify({'error': 'period_start and period_end are required'}), 400
+        
+        employees = Employee.query.filter_by(
+            church_id=church_id,
+            is_active=True
+        ).all()
+        
+        payroll_items = []
+        total_gross = 0
+        total_ssnit = 0
+        total_provident = 0
+        total_paye = 0
+        total_net = 0
+        
+        for emp in employees:
+            gross = float(emp.basic_salary) if emp.basic_salary else 0
+            ssnit = gross * 0.055
+            provident = gross * 0.05
+            paye = gross * 0.1 if gross > 400 else 0
+            deductions = ssnit + provident + paye
+            net = gross - deductions
+            
+            payroll_items.append({
+                'employee_id': emp.id,
+                'employee_number': emp.employee_number,
+                'name': f"{emp.first_name} {emp.last_name}",
+                'gross_pay': round(gross, 2),
+                'ssnit': round(ssnit, 2),
+                'provident_fund': round(provident, 2),
+                'paye': round(paye, 2),
+                'total_deductions': round(deductions, 2),
+                'net_pay': round(net, 2)
+            })
+            
+            total_gross += gross
+            total_ssnit += ssnit
+            total_provident += provident
+            total_paye += paye
+            total_net += net
+        
+        return jsonify({
+            'employee_count': len(employees),
+            'items': payroll_items,
+            'summary': {
+                'total_gross': round(total_gross, 2),
+                'total_ssnit': round(total_ssnit, 2),
+                'total_provident_fund': round(total_provident, 2),
+                'total_paye': round(total_paye, 2),
+                'total_deductions': round(total_ssnit + total_provident + total_paye, 2),
+                'total_net': round(total_net, 2)
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error previewing payroll: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
