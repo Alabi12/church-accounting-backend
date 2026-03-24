@@ -1039,6 +1039,7 @@ def create_journal_entry():
             entry_date=entry_date,
             description=data['description'],
             reference=data.get('reference'),
+            notes=data.get('notes'),
             status='DRAFT',
             created_by=current_user.id if current_user else None
         )
@@ -1159,6 +1160,8 @@ def update_journal_entry(entry_id):
             entry.description = data['description']
         if 'reference' in data:
             entry.reference = data['reference']
+        if 'notes' in data:
+            entry.notes = data['notes']
         
         # Update lines if provided
         if 'lines' in data:
