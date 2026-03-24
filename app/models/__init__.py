@@ -1,35 +1,50 @@
-# app/models/__init__.py
-from .enums import UserRole, Permission
-from .user import User
-from .church import Church
-from .account import Account
-from .transaction import Transaction
-from .member import Member
-from .audit import AuditLog
-from .role import Role, PermissionModel, UserRole as UserRoleModel
-from .setting import Setting
-from .budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
+from app.models.user import User
+from app.models.church import Church
+from app.models.account import Account
+from app.models.transaction import Transaction
 from app.models.budget import Budget, BudgetCategory, BudgetComment, BudgetAttachment
-from .journal import JournalEntry, JournalLine
-from .approval import ApprovalWorkflow, ApprovalWorkflowStep, ApprovalRequest, Approval, ApprovalComment
-# from .employee import Employee, TimeEntry
-from .payroll import PayrollRun, PayrollLine 
-from .deduction import DeductionType, EmployeeDeduction
-from .leave import LeaveBalance, LeaveRequest
-from .tax import TaxTable
-from .payslip import Payslip
+from app.models.audit import AuditLog
+from app.models.journal import JournalEntry, JournalLine
+from app.models.employee import Employee
+from app.models.payroll import PayrollRun, PayrollLine
+from app.models.leave import LeaveRequest, LeaveBalance, LeaveType
+from app.models.tax import TaxTable
+from app.models.payslip import Payslip
+from app.models.deduction import DeductionType, EmployeeDeduction
+from app.models.role import Role, PermissionModel, UserRole
+from app.models.member import Member
+from app.models.setting import Setting
+from app.models.approval import (
+    ApprovalWorkflow, ApprovalWorkflowStep, 
+    ApprovalRequest, Approval, ApprovalComment
+)
+from app.models.enums import (
+    UserRole as UserRoleEnum, 
+    Permission as PermissionEnum,  # This is the Permission class with VIEW_AUDIT_LOGS
+    TransactionType, AccountType, BudgetStatus, JournalStatus,
+    LeaveStatus, PayrollStatus, EmployeeStatus, LeaveTypeEnum, DeductionTypeEnum
+)
+
+# Use PermissionEnum as Permission for the decorators
+Permission = PermissionEnum
+
+# Import relationships
+from app.models import relationships
 
 __all__ = [
-    'UserRole', 'Permission',
-    'User', 'Church', 'Account', 'Transaction', 'Member',
-    'AuditLog', 'Role', 'PermissionModel', 'UserRoleModel', 'Setting',
+    'User', 'Church', 'Account', 'Transaction', 
     'Budget', 'BudgetCategory', 'BudgetComment', 'BudgetAttachment',
-    'JournalEntry', 'JournalLine',
-    'ApprovalWorkflow', 'ApprovalWorkflowStep', 'ApprovalRequest', 'Approval', 'ApprovalComment',
+    'AuditLog', 'JournalEntry', 'JournalLine',
     'Employee',
     'PayrollRun', 'PayrollLine',
-    'DeductionType', 'EmployeeDeduction',
-    'LeaveBalance', 'LeaveRequest',
+    'LeaveRequest', 'LeaveBalance', 'LeaveType',
     'TaxTable',
-    'Payslip'
+    'Payslip',
+    'DeductionType', 'EmployeeDeduction',
+    'Role', 'PermissionModel', 'Permission', 'UserRole', 'Member',
+    'Setting',
+    'ApprovalWorkflow', 'ApprovalWorkflowStep', 'ApprovalRequest', 'Approval', 'ApprovalComment',
+    'UserRoleEnum', 'PermissionEnum',
+    'TransactionType', 'AccountType', 'BudgetStatus', 'JournalStatus',
+    'LeaveStatus', 'PayrollStatus', 'EmployeeStatus', 'LeaveTypeEnum', 'DeductionTypeEnum'
 ]

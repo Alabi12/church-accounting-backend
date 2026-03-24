@@ -47,3 +47,65 @@ class Permission:
     # User permissions
     VIEW_USERS = 'view_users'
     MANAGE_USERS = 'manage_users'
+class TransactionType(str, Enum):
+    INCOME = "INCOME"
+    EXPENSE = "EXPENSE"
+    TRANSFER = "TRANSFER"
+
+class AccountType(str, Enum):
+    ASSET = "ASSET"
+    LIABILITY = "LIABILITY"
+    EQUITY = "EQUITY"
+    REVENUE = "REVENUE"
+    EXPENSE = "EXPENSE"
+
+class BudgetStatus(str, Enum):
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+class JournalStatus(str, Enum):
+    DRAFT = "DRAFT"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    POSTED = "POSTED"
+    VOID = "VOID"
+
+class LeaveStatus(str, Enum):
+    PENDING = "PENDING"
+    REVIEWED = "REVIEWED"
+    RECOMMENDED = "RECOMMENDED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    RETURNED = "RETURNED"
+
+class PayrollStatus(str, Enum):
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    REVIEWED = "REVIEWED"
+    RETURNED = "RETURNED"
+    APPROVED = "APPROVED"
+    PROCESSED = "PROCESSED"
+
+class EmployeeStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    TERMINATED = "TERMINATED"
+    ON_LEAVE = "ON_LEAVE"
+
+class LeaveTypeEnum(str, Enum):
+    ANNUAL = "ANNUAL"
+    SICK = "SICK"
+    MATERNITY = "MATERNITY"
+    PATERNITY = "PATERNITY"
+    COMPASSIONATE = "COMPASSIONATE"
+    UNPAID = "UNPAID"
+    STUDY = "STUDY"
+
+class DeductionTypeEnum(str, Enum):
+    TAX = "TAX"
+    SSNIT = "SSNIT"
+    PROVIDENT_FUND = "PROVIDENT_FUND"
+    LOAN = "LOAN"
+    OTHER = "OTHER"

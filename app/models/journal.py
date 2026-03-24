@@ -1,41 +1,34 @@
-# app/models/journal.py
 from app.extensions import db
 from datetime import datetime
 
 class JournalEntry(db.Model):
     __tablename__ = 'journal_entries'
+    __table_args__ = {'extend_existing': True}
     
     id = db.Column(db.Integer, primary_key=True)
+    church_id = db.Column(db.Integer, db.ForeignKey('churches.id'), nullable=False)
     entry_number = db.Column(db.String(50), unique=True, nullable=False)
     entry_date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     description = db.Column(db.Text)
     reference = db.Column(db.String(100))
     
-    # Status: DRAFT, PENDING, APPROVED, POSTED, VOID
     status = db.Column(db.String(20), nullable=False, default='DRAFT')
     
-    # Audit fields
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Approval fields
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     approved_at = db.Column(db.DateTime)
     
-    # Posting fields
     posted_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     posted_at = db.Column(db.DateTime)
     
-    # Void fields
     voided_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     voided_at = db.Column(db.DateTime)
     void_reason = db.Column(db.Text)
     
-    # Church
-    church_id = db.Column(db.Integer, db.ForeignKey('churches.id'), nullable=False)
-    
-    # Relationships
-    church = db.relationship('Church', backref='journal_entries')
+    # Use back_populates instead of backref
+    church = db.relationship('Church', back_populates='journal_entries')
     creator = db.relationship('User', foreign_keys=[created_by], backref='created_journal_entries')
     approver = db.relationship('User', foreign_keys=[approved_by], backref='approved_journal_entries')
     poster = db.relationship('User', foreign_keys=[posted_by], backref='posted_journal_entries')
@@ -43,10 +36,10 @@ class JournalEntry(db.Model):
     lines = db.relationship('JournalLine', back_populates='journal_entry', cascade='all, delete-orphan')
     
     def to_dict(self):
-        creator_name = self.creator.username if self.creator else None
-        approver_name = self.approver.username if self.approver else None
-        poster_name = self.poster.username if self.poster else None
-        voider_name = self.voider.username if self.voider else None
+        creator_name = self.creator.full_name if self.creator else None
+        approver_name = self.approver.full_name if self.approver else None
+        poster_name = self.poster.full_name if self.poster else None
+        voider_name = self.voider.full_name if self.voider else None
         
         total_debit = sum(float(line.debit) for line in self.lines)
         total_credit = sum(float(line.credit) for line in self.lines)
@@ -82,24 +75,24 @@ class JournalEntry(db.Model):
 
 class JournalLine(db.Model):
     __tablename__ = 'journal_lines'
+    __table_args__ = {'extend_existing': True}
     
     id = db.Column(db.Integer, primary_key=True)
     journal_entry_id = db.Column(db.Integer, db.ForeignKey('journal_entries.id'), nullable=False)
     account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False)
     
-    # Debit and Credit - only one should be > 0
     debit = db.Column(db.Numeric(15, 2), default=0)
     credit = db.Column(db.Numeric(15, 2), default=0)
     
     description = db.Column(db.Text)
     
-    # Relationships
     journal_entry = db.relationship('JournalEntry', back_populates='lines')
     account = db.relationship('Account', backref='journal_lines')
     
     __table_args__ = (
         db.CheckConstraint('(debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0)', 
                           name='check_debit_credit_exclusive'),
+        {'extend_existing': True}
     )
     
     def to_dict(self):

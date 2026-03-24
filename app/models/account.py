@@ -128,4 +128,5 @@ class Account(db.Model):
                 Account.name.ilike('%bank%')
             ),
             Account.is_active == True
-        ).all()
+        ).all()# If there's a church relationship with backref, change it to:
+# church = db.relationship('Church', back_populates='accounts')
