@@ -270,7 +270,8 @@ def get_account_balance(account_id):
         ).limit(100).all()
         
         transaction_list = []
-        running_balance = float(account.opening_balance)
+        opening_balance = float(account.opening_balance) if account.opening_balance is not None else 0.0
+        running_balance = opening_balance
         
         # Sort by date ascending for running balance calculation
         transactions.reverse()
@@ -2413,12 +2414,14 @@ def get_general_ledger():
         
         results = query.order_by(JournalEntry.entry_date).all()
         
-        # Calculate running balance
+        # Calculate running balance - FIX: Handle None values
+        opening_balance = float(account.opening_balance) if account.opening_balance is not None else 0.0
+        running_balance = opening_balance
+        
         entries = []
-        running_balance = float(account.opening_balance)
         
         # Add opening balance entry
-        if results or account.opening_balance != 0:
+        if results or opening_balance != 0:
             entries.append({
                 'id': None,
                 'date': (start_date or datetime.utcnow()).isoformat() if start_date else account.created_at.isoformat(),
@@ -2459,7 +2462,7 @@ def get_general_ledger():
             },
             'entries': entries,
             'summary': {
-                'openingBalance': float(account.opening_balance),
+                'openingBalance': opening_balance,
                 'totalDebit': float(total_debit),
                 'totalCredit': float(total_credit),
                 'closingBalance': float(running_balance)
@@ -2469,8 +2472,7 @@ def get_general_ledger():
     except Exception as e:
         logger.error(f"Error getting ledger: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'error': 'Failed to get ledger entries'}), 500
-    
+        return jsonify({'error': 'Failed to get ledger entries'}), 500 
 
 @accounting_bp.route('/test-financial', methods=['GET'])
 @token_required
