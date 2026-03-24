@@ -3,7 +3,7 @@
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.models import (
-    Employee, PayrollRun, PayrollItem, 
+    Employee, PayrollRun, PayrollLine, 
     DeductionType, EmployeeDeduction, 
     User, JournalEntry, JournalLine,
     Account, AuditLog, Church
@@ -948,7 +948,7 @@ def process_payroll():
                 item_data.get('other_deductions', 0)
             )
             
-            item = PayrollItem(
+            item = PayrollLine(
                 payroll_run_id=payroll_run.id,
                 employee_id=item_data['employee_id'],
                 regular_pay=item_data.get('period_gross', item_data.get('gross_pay', 0)),

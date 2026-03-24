@@ -1,7 +1,7 @@
 # app/routes/payslip_routes.py
 from flask import Blueprint, request, jsonify, send_file, g, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import Payslip, PayrollItem, Employee, User, AuditLog, PayrollRun, Church  # Added Church
+from app.models import Payslip, PayrollLine, Employee, User, AuditLog, PayrollRun, Church  # Added Church
 from app.extensions import db
 from datetime import datetime
 import io
@@ -433,8 +433,8 @@ def get_employee_payslips(employee_id):
             return jsonify({'error': 'Unauthorized'}), 403
         
         # Get payslips through payroll items
-        payslips = Payslip.query.join(PayrollItem).filter(
-            PayrollItem.employee_id == employee_id
+        payslips = Payslip.query.join(PayrollLine).filter(
+            PayrollLine.employee_id == employee_id
         ).order_by(Payslip.created_at.desc()).all()
         
         result = []
@@ -579,8 +579,8 @@ def bulk_email_payslips(payroll_run_id):
         if user.church_id != payroll_run.church_id:
             return jsonify({'error': 'Unauthorized'}), 403
         
-        payslips = Payslip.query.join(PayrollItem).filter(
-            PayrollItem.payroll_run_id == payroll_run_id
+        payslips = Payslip.query.join(PayrollLine).filter(
+            PayrollLine.payroll_run_id == payroll_run_id
         ).all()
         
         sent = []
@@ -657,7 +657,7 @@ def get_all_payslips():
         church_id = ensure_user_church()  # Now this function is defined
         
         # Get all payslips through payroll items and payroll runs
-        payslips = Payslip.query.join(PayrollItem).join(PayrollRun).filter(
+        payslips = Payslip.query.join(PayrollLine).join(PayrollRun).filter(
             PayrollRun.church_id == church_id
         ).order_by(Payslip.created_at.desc()).all()
         
@@ -693,8 +693,8 @@ def get_payroll_run_payslips(payroll_run_id):
         if user.church_id != payroll_run.church_id and not user.is_admin:
             return jsonify({'error': 'Unauthorized'}), 403
         
-        payslips = Payslip.query.join(PayrollItem).filter(
-            PayrollItem.payroll_run_id == payroll_run_id
+        payslips = Payslip.query.join(PayrollLine).filter(
+            PayrollLine.payroll_run_id == payroll_run_id
         ).all()
         
         result = []

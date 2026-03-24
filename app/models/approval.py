@@ -1,4 +1,3 @@
-# app/models/approval.py
 from app.extensions import db
 from datetime import datetime
 
@@ -14,8 +13,8 @@ class ApprovalWorkflow(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Relationships
-    church = db.relationship('Church', backref='approval_workflows')
+    # Use back_populates instead of backref
+    church = db.relationship('Church', back_populates='approval_workflows')
     steps_config = db.relationship('ApprovalWorkflowStep', backref='workflow', lazy='dynamic')
 
 
@@ -46,8 +45,8 @@ class ApprovalRequest(db.Model):
     requested_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
     
-    # Relationships - FIXED: Use back_populates instead of backref
-    church = db.relationship('Church', backref='approval_requests')
+    # Use back_populates
+    church = db.relationship('Church', back_populates='approval_requests')
     requester = db.relationship('User', foreign_keys=[requested_by], backref='requested_approvals')
     approvals = db.relationship('Approval', back_populates='approval_request', lazy='dynamic')
 
@@ -58,14 +57,13 @@ class Approval(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     request_id = db.Column(db.Integer, db.ForeignKey('approval_requests.id'), nullable=False)
-    # THIS MUST BE nullable=True
     approver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     step_number = db.Column(db.Integer, nullable=False)
     status = db.Column(db.String(20), nullable=False)
     comments = db.Column(db.Text)
     actioned_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Relationships
+    # Use back_populates
     approval_request = db.relationship('ApprovalRequest', back_populates='approvals')
     approver = db.relationship('User', foreign_keys=[approver_id], backref='approvals')
     comments_list = db.relationship('ApprovalComment', back_populates='approval', cascade='all, delete-orphan')
@@ -81,6 +79,6 @@ class ApprovalComment(db.Model):
     comment = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Relationships
+    # Use back_populates
     approval = db.relationship('Approval', back_populates='comments_list')
     user = db.relationship('User', foreign_keys=[user_id], backref='approval_comments')
