@@ -4,33 +4,29 @@ from decimal import Decimal
 
 class Employee(db.Model):
     __tablename__ = 'employees'
-    __table_args__ = {'extend_existing': True}
-
+    
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     church_id = db.Column(db.Integer, db.ForeignKey('churches.id'), nullable=False)
-    employee_number = db.Column(db.String(50), unique=True, nullable=False)  # This is the correct column name
+    employee_number = db.Column(db.String(50), unique=True, nullable=False)
     first_name = db.Column(db.String(100), nullable=False)
     last_name = db.Column(db.String(100), nullable=False)
-    middle_name = db.Column(db.String(100))
     email = db.Column(db.String(200))
     phone = db.Column(db.String(20))
     position = db.Column(db.String(100))
     department = db.Column(db.String(100))
     employment_type = db.Column(db.String(50))
     hire_date = db.Column(db.Date)
-    termination_date = db.Column(db.Date)
-    is_active = db.Column(db.Boolean, default=True)
     basic_salary = db.Column(db.Numeric(15, 2), default=0)
     allowances = db.Column(db.Numeric(15, 2), default=0)
-    hourly_rate = db.Column(db.Numeric(10, 2), default=0)
-    ssnit_number = db.Column(db.String(50))
-    tax_id = db.Column(db.String(50))
     bank_name = db.Column(db.String(100))
     bank_account_number = db.Column(db.String(50))
     bank_branch = db.Column(db.String(100))
+    ssnit_number = db.Column(db.String(50))
+    tax_id = db.Column(db.String(50))
+    is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     @property
     def full_name(self):
