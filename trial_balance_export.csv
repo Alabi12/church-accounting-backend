@@ -1,9 +1,0 @@
-TRIAL BALANCE
-As at: 2026-03-24
-
-Account Code,Account Name,Account Type,Debit (GHS),Credit (GHS)
-1010,Cash in Hand,ASSET,"5,000.00",-
-4191,Tithes,REVENUE,-,"5,000.00"
-
-TOTAL,,,"5,000.00","5,000.00"
-STATUS,,,BALANCED

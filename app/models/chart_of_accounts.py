@@ -121,3 +121,11 @@ CATEGORY_GROUPS = {
         'Other Expenses': ['5010', '5020', '5190', '5200', '5210'],
     }
 }
+
+# Get all accounts as a flat list (useful for seeding)
+ALL_ACCOUNTS = []
+for account_type, accounts in CHART_OF_ACCOUNTS.items():
+    for account in accounts:
+        account_copy = account.copy()
+        account_copy['account_type'] = account_type
+        ALL_ACCOUNTS.append(account_copy)
