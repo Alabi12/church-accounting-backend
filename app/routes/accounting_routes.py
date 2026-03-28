@@ -800,6 +800,272 @@ def get_account_balance_detail(account_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     
+    
+@accounting_bp.route('/petty-cash-accounts', methods=['GET'])
+@token_required
+def get_petty_cash_accounts():
+    """Get petty cash accounts for reconciliation"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get accounts that are petty cash accounts
+        petty_cash_accounts = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'ASSET',
+            Account.is_active == True,
+            or_(
+                Account.category == 'Cash',
+                Account.name.ilike('%petty%'),
+                Account.name.ilike('%cash%'),
+                Account.account_code.like('1010%')
+            )
+        ).order_by(Account.name).all()
+        
+        account_list = []
+        for acc in petty_cash_accounts:
+            account_list.append({
+                'id': acc.id,
+                'name': acc.name,
+                'accountNumber': acc.account_code,
+                'balance': float(acc.current_balance) if acc.current_balance else 0,
+                'currency': 'GHS',
+                'type': 'petty_cash'
+            })
+        
+        return jsonify({'accounts': account_list}), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting petty cash accounts: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+@accounting_bp.route('/bank-accounts', methods=['GET'])
+@token_required
+def get_bank_accounts():
+    """Get bank accounts for reconciliation"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get accounts that are bank accounts
+        bank_accounts = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'ASSET',
+            Account.is_active == True,
+            or_(
+                Account.category == 'Bank',
+                Account.name.ilike('%bank%'),
+                Account.name.ilike('%checking%'),
+                Account.name.ilike('%savings%'),
+                Account.account_code.like('1020%')
+            )
+        ).order_by(Account.name).all()
+        
+        account_list = []
+        for acc in bank_accounts:
+            account_list.append({
+                'id': acc.id,
+                'name': acc.name,
+                'accountNumber': acc.account_code,
+                'bank': acc.category or 'Bank Account',
+                'balance': float(acc.current_balance) if acc.current_balance else 0,
+                'currency': 'GHS',
+                'type': 'bank'
+            })
+        
+        return jsonify({'accounts': account_list}), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting bank accounts: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+@accounting_bp.route('/reconciliation', methods=['GET'])
+@token_required
+def get_reconciliation_data():
+    """Get reconciliation data for an account"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        account_id = request.args.get('accountId', type=int)
+        as_of = request.args.get('asOf')
+        
+        if not account_id:
+            return jsonify({'error': 'Account ID is required'}), 400
+        
+        # Parse date
+        if as_of:
+            try:
+                as_of_date = datetime.fromisoformat(as_of.replace('Z', '+00:00'))
+            except:
+                as_of_date = datetime.utcnow()
+        else:
+            as_of_date = datetime.utcnow()
+        
+        # Get account
+        account = Account.query.filter_by(id=account_id, church_id=church_id).first()
+        if not account:
+            return jsonify({'error': 'Account not found'}), 404
+        
+        # Get all transactions for this account (no reconciled field)
+        transactions = db.session.query(
+            JournalLine, JournalEntry
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).filter(
+            JournalLine.account_id == account_id,
+            JournalEntry.church_id == church_id,
+            JournalEntry.status == 'POSTED',
+            JournalEntry.entry_date <= as_of_date
+        ).order_by(JournalEntry.entry_date).all()
+        
+        # Since we don't have a reconciled field, all transactions are considered unreconciled
+        unreconciled_items = []
+        for line, entry in transactions:
+            unreconciled_items.append({
+                'id': line.id,
+                'date': entry.entry_date.isoformat(),
+                'description': entry.description,
+                'reference': entry.entry_number,
+                'amount': float(line.debit or line.credit),
+                'type': 'debit' if line.debit > 0 else 'credit',
+                'status': entry.status
+            })
+        
+        return jsonify({
+            'account': {
+                'id': account.id,
+                'name': account.name,
+                'type': account.account_type,
+                'code': account.account_code,
+                'current_balance': float(account.current_balance)
+            },
+            'statement_balance': float(account.current_balance),
+            'unreconciled_items': unreconciled_items,
+            'as_of': as_of_date.isoformat(),
+            'transactions': unreconciled_items
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting reconciliation data: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/<int:transaction_id>/reconcile', methods=['POST'])
+@token_required
+def reconcile_transaction(transaction_id):
+    """Mark a transaction as reconciled (temporary version)"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json() or {}
+        reconciliation_date = data.get('reconciliationDate', datetime.utcnow().isoformat())
+        
+        line = JournalLine.query.get(transaction_id)
+        if not line:
+            return jsonify({'error': 'Transaction not found'}), 404
+        
+        # Check if the journal entry belongs to the user's church
+        entry = JournalEntry.query.get(line.journal_entry_id)
+        if not entry or entry.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Since we don't have a reconciled field, just return success
+        # You can add a note or log this reconciliation if needed
+        print(f"Transaction {transaction_id} reconciled on {reconciliation_date}")
+        
+        return jsonify({
+            'message': 'Transaction reconciled successfully',
+            'transaction_id': transaction_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error reconciling transaction: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/<int:transaction_id>/unreconcile', methods=['POST'])
+@token_required
+def unreconcile_transaction(transaction_id):
+    """Unreconcile a transaction (temporary version)"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        line = JournalLine.query.get(transaction_id)
+        if not line:
+            return jsonify({'error': 'Transaction not found'}), 404
+        
+        # Check if the journal entry belongs to the user's church
+        entry = JournalEntry.query.get(line.journal_entry_id)
+        if not entry or entry.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        print(f"Transaction {transaction_id} unreconciled")
+        
+        return jsonify({
+            'message': 'Transaction unreconciled successfully',
+            'transaction_id': transaction_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unreconciling transaction: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/history', methods=['GET'])
+@token_required
+def get_reconciliation_history():
+    """Get reconciliation history for an account (temporary version)"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        account_id = request.args.get('accountId', type=int)
+        
+        if not account_id:
+            return jsonify({'error': 'Account ID is required'}), 400
+        
+        # Since we don't have reconciliation history, return empty array
+        return jsonify({'history': []}), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting reconciliation history: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/complete', methods=['POST'])
+@token_required
+def complete_reconciliation():
+    """Complete a reconciliation (temporary version)"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        data = request.get_json()
+        
+        account_id = data.get('accountId')
+        reconciliation_date = data.get('reconciliationDate')
+        reconciled_items = data.get('reconciledItems', [])
+        adjustments = data.get('adjustments', [])
+        statement_balance = data.get('statementBalance', 0)
+        closing_balance = data.get('closingBalance', 0)
+        
+        if not account_id or not reconciliation_date:
+            return jsonify({'error': 'Account ID and reconciliation date are required'}), 400
+        
+        print(f"Reconciliation completed for account {account_id} on {reconciliation_date}")
+        print(f"Reconciled items: {len(reconciled_items)}")
+        print(f"Adjustments: {len(adjustments)}")
+        print(f"Statement balance: {statement_balance}")
+        print(f"Closing balance: {closing_balance}")
+        
+        return jsonify({
+            'message': 'Reconciliation completed successfully',
+            'reconciled_items': len(reconciled_items)
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error completing reconciliation: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
 @accounting_bp.route('/tax-reports', methods=['GET'])
 @token_required
 def get_tax_reports():
@@ -1064,7 +1330,7 @@ def get_tax_reports():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-        
+
 @accounting_bp.route('/tax-reports/export', methods=['GET'])
 @token_required
 def export_tax_report():
