@@ -14,59 +14,26 @@ church_bp = Blueprint('church', __name__)
 
 # ==================== CHURCH MANAGEMENT ====================
 
-@church_bp.route('/churches', methods=['GET', 'OPTIONS'])
+# In church_routes.py, update the get_churches function
+@church_bp.route('/churches', methods=['GET'])
 @token_required
 def get_churches():
     """Get all churches (admin only)"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
-        # Only super_admin and admin can see all churches
+        # Check if user is admin
         if g.current_user.role not in ['super_admin', 'admin']:
-            # Regular users only see their church
-            church = Church.query.get(g.current_user.church_id)
-            return jsonify({
-                'churches': [{
-                    'id': church.id,
-                    'name': church.name,
-                    'legal_name': church.legal_name,
-                    'address': church.address,
-                    'city': church.city,
-                    'state': church.state,
-                    'country': church.country,
-                    'phone': church.phone,
-                    'email': church.email,
-                    'website': church.website,
-                    'tax_id': church.tax_id,
-                    'founded_date': church.founded_date.isoformat() if church.founded_date else None,
-                    'pastor_name': church.pastor_name,
-                    'denomination': church.denomination,
-                    'is_active': church.is_active if hasattr(church, 'is_active') else True,
-                    'created_at': church.created_at.isoformat() if church.created_at else None
-                }]
-            }), 200
+            return jsonify({'error': 'Unauthorized'}), 403
         
-        # Admin view - get all churches
         churches = Church.query.all()
+        
         church_list = []
         for church in churches:
             church_list.append({
                 'id': church.id,
-                'name': church.name,
-                'legal_name': church.legal_name,
+                'name': church.name,  # Use 'name' instead of 'legal_name'
                 'address': church.address,
-                'city': church.city,
-                'state': church.state,
-                'country': church.country,
                 'phone': church.phone,
                 'email': church.email,
-                'website': church.website,
-                'tax_id': church.tax_id,
-                'founded_date': church.founded_date.isoformat() if church.founded_date else None,
-                'pastor_name': church.pastor_name,
-                'denomination': church.denomination,
-                'is_active': church.is_active if hasattr(church, 'is_active') else True,
                 'created_at': church.created_at.isoformat() if church.created_at else None
             })
         
@@ -76,7 +43,6 @@ def get_churches():
         logger.error(f"Error fetching churches: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
 
 @church_bp.route('/churches/my', methods=['GET', 'OPTIONS'])
 @token_required
