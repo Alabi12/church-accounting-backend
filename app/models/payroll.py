@@ -4,7 +4,6 @@ from decimal import Decimal
 
 class PayrollRun(db.Model):
     __tablename__ = 'payroll_runs'
-    __table_args__ = {'extend_existing': True}
     
     id = db.Column(db.Integer, primary_key=True)
     church_id = db.Column(db.Integer, db.ForeignKey('churches.id'), nullable=False)
@@ -14,35 +13,27 @@ class PayrollRun(db.Model):
     payment_date = db.Column(db.Date, nullable=False)
     status = db.Column(db.String(20), default='DRAFT')
     
-    gross_pay = db.Column(db.Numeric(15, 2), default=0)
+    # Totals
+    total_gross = db.Column(db.Numeric(15, 2), default=0)
     total_deductions = db.Column(db.Numeric(15, 2), default=0)
-    net_pay = db.Column(db.Numeric(15, 2), default=0)
+    total_net = db.Column(db.Numeric(15, 2), default=0)
     
+    # Workflow tracking
     submitted_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     submitted_at = db.Column(db.DateTime)
     approved_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     approved_at = db.Column(db.DateTime)
+    approval_comments = db.Column(db.Text)
+    processed_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    processed_at = db.Column(db.DateTime)
     
+    # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Use back_populates instead of backref
+    # Relationships
     church = db.relationship('Church', back_populates='payroll_runs')
     lines = db.relationship('PayrollLine', back_populates='payroll_run', cascade='all, delete-orphan')
-    
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'run_number': self.run_number,
-            'period_start': self.period_start.isoformat() if self.period_start else None,
-            'period_end': self.period_end.isoformat() if self.period_end else None,
-            'payment_date': self.payment_date.isoformat() if self.payment_date else None,
-            'status': self.status,
-            'gross_pay': float(self.gross_pay),
-            'total_deductions': float(self.total_deductions),
-            'net_pay': float(self.net_pay)
-        }
-
 
 class PayrollLine(db.Model):
     __tablename__ = 'payroll_lines'
