@@ -800,7 +800,7 @@ def get_account_balance_detail(account_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     
-    
+
 @accounting_bp.route('/petty-cash-accounts', methods=['GET'])
 @token_required
 def get_petty_cash_accounts():
@@ -1900,5 +1900,108 @@ def get_general_ledger():
         
     except Exception as e:
         logger.error(f"Error getting ledger: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+    # In accounting_routes.py or treasurer_routes.py
+
+@accounting_bp.route('/treasurer/category-breakdown', methods=['GET'])
+@token_required
+def get_category_breakdown():
+    """Get category breakdown for treasurer dashboard"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        period = request.args.get('period', 'month')
+        
+        # Determine date range based on period
+        end_date = datetime.utcnow().date()
+        if period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get income by category (revenue accounts)
+        income_by_category = db.session.query(
+            Account.category,
+            func.sum(JournalLine.credit).label('amount')
+        ).join(
+            JournalLine, JournalLine.account_id == Account.id
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'REVENUE'
+        ).group_by(Account.category).all()
+        
+        # Get expenses by category
+        expense_by_category = db.session.query(
+            Account.category,
+            func.sum(JournalLine.debit).label('amount')
+        ).join(
+            JournalLine, JournalLine.account_id == Account.id
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'EXPENSE'
+        ).group_by(Account.category).all()
+        
+        # Format response
+        income = []
+        total_income = 0
+        for cat, amount in income_by_category:
+            if cat:
+                amount_val = float(amount) if amount else 0
+                income.append({
+                    'category': cat,
+                    'amount': amount_val,
+                    'percentage': 0  # Calculate after total is known
+                })
+                total_income += amount_val
+        
+        expenses = []
+        total_expenses = 0
+        for cat, amount in expense_by_category:
+            if cat:
+                amount_val = float(amount) if amount else 0
+                expenses.append({
+                    'category': cat,
+                    'amount': amount_val,
+                    'percentage': 0
+                })
+                total_expenses += amount_val
+        
+        # Calculate percentages
+        for item in income:
+            item['percentage'] = round((item['amount'] / total_income * 100), 2) if total_income > 0 else 0
+        
+        for item in expenses:
+            item['percentage'] = round((item['amount'] / total_expenses * 100), 2) if total_expenses > 0 else 0
+        
+        return jsonify({
+            'income': income,
+            'expenses': expenses,
+            'total_income': total_income,
+            'total_expenses': total_expenses,
+            'net_income': total_income - total_expenses,
+            'period': period,
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting category breakdown: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
