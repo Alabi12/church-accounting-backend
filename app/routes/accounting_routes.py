@@ -2772,10 +2772,12 @@ def export_tax_report():
     try:
         church_id = ensure_user_church(g.current_user)
         
+        # Parse year from request
         year = request.args.get('year')
         if not year:
             year = datetime.utcnow().year
         
+        # Handle nested param format like year[year]=2026
         if isinstance(year, dict):
             year = year.get('year', datetime.utcnow().year)
         
@@ -2790,9 +2792,6 @@ def export_tax_report():
         start_date = datetime(year, 1, 1)
         end_date = datetime(year, 12, 31, 23, 59, 59)
         
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
         import csv
         import io
         
@@ -2800,7 +2799,8 @@ def export_tax_report():
         writer = csv.writer(output)
         
         if report_type == 'summary':
-            total_income = db.session.query(
+            # Get total income for the year - convert to float
+            total_income_result = db.session.query(
                 func.sum(JournalLine.credit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2814,7 +2814,10 @@ def export_tax_report():
                 Account.account_type == 'REVENUE'
             ).scalar() or 0
             
-            total_expenses = db.session.query(
+            total_income = float(total_income_result) if total_income_result else 0.0
+            
+            # Get total expenses for the year
+            total_expenses_result = db.session.query(
                 func.sum(JournalLine.debit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2828,7 +2831,10 @@ def export_tax_report():
                 Account.account_type == 'EXPENSE'
             ).scalar() or 0
             
-            tax_exempt = db.session.query(
+            total_expenses = float(total_expenses_result) if total_expenses_result else 0.0
+            
+            # Get tax-exempt income
+            tax_exempt_result = db.session.query(
                 func.sum(JournalLine.credit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2843,7 +2849,10 @@ def export_tax_report():
                 Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
             ).scalar() or 0
             
-            taxes_paid = db.session.query(
+            tax_exempt = float(tax_exempt_result) if tax_exempt_result else 0.0
+            
+            # Get taxes paid
+            taxes_paid_result = db.session.query(
                 func.sum(JournalLine.debit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2858,10 +2867,13 @@ def export_tax_report():
                 Account.category == 'Taxes'
             ).scalar() or 0
             
+            taxes_paid = float(taxes_paid_result) if taxes_paid_result else 0.0
+            
             taxable_income = total_income - tax_exempt
             estimated_tax = taxable_income * 0.05
-            tax_due = max(0, estimated_tax - taxes_paid)
+            tax_due = max(0.0, estimated_tax - taxes_paid)
             
+            # Write CSV
             writer.writerow(['Tax Summary Report'])
             writer.writerow([f'Year: {year}'])
             writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
@@ -2891,7 +2903,7 @@ def export_tax_report():
                 else:
                     q_end = datetime(year, 12, 31)
                 
-                q_income = db.session.query(
+                q_income_result = db.session.query(
                     func.sum(JournalLine.credit)
                 ).join(
                     JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2905,7 +2917,9 @@ def export_tax_report():
                     Account.account_type == 'REVENUE'
                 ).scalar() or 0
                 
-                q_tax_paid = db.session.query(
+                q_income = float(q_income_result) if q_income_result else 0.0
+                
+                q_tax_paid_result = db.session.query(
                     func.sum(JournalLine.debit)
                 ).join(
                     JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2920,6 +2934,8 @@ def export_tax_report():
                     Account.category == 'Taxes'
                 ).scalar() or 0
                 
+                q_tax_paid = float(q_tax_paid_result) if q_tax_paid_result else 0.0
+                
                 writer.writerow([
                     f'Q{q}',
                     f'{q_income:,.2f}',
@@ -2928,6 +2944,12 @@ def export_tax_report():
                 ])
         
         elif report_type == 'withholding':
+            writer.writerow(['Withholding Tax Report'])
+            writer.writerow([f'Year: {year}'])
+            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
+            writer.writerow([])
+            writer.writerow(['Employee', 'Position', 'Wages (GHS)', 'Federal Withheld (GHS)', 'State Withheld (GHS)', 'FICA Withheld (GHS)'])
+            
             salaries = db.session.query(
                 Account.name,
                 func.sum(JournalLine.debit).label('total')
@@ -2944,23 +2966,24 @@ def export_tax_report():
                 Account.category.in_(['Staff Cost', 'Salary', 'Wages'])
             ).group_by(Account.id).all()
             
-            writer.writerow(['Withholding Tax Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Employee', 'Position', 'Wages (GHS)', 'Federal Withheld (GHS)', 'State Withheld (GHS)', 'FICA Withheld (GHS)'])
-            
             for salary in salaries:
+                total = float(salary.total) if salary.total else 0.0
                 writer.writerow([
                     salary.name,
                     'Employee',
-                    f'{salary.total:,.2f}',
-                    f'{salary.total * 0.15:,.2f}',
-                    f'{salary.total * 0.05:,.2f}',
-                    f'{salary.total * 0.0765:,.2f}'
+                    f'{total:,.2f}',
+                    f'{total * 0.15:,.2f}',
+                    f'{total * 0.05:,.2f}',
+                    f'{total * 0.0765:,.2f}'
                 ])
         
         elif report_type == 'donor':
+            writer.writerow(['Donor Contribution Report'])
+            writer.writerow([f'Year: {year}'])
+            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
+            writer.writerow([])
+            writer.writerow(['Donor Name', 'Total Gifts (GHS)', 'Cash (GHS)', 'Non-Cash (GHS)', 'Statements'])
+            
             donor_contributions = db.session.query(
                 Account.name,
                 func.sum(JournalLine.credit).label('total')
@@ -2977,22 +3000,23 @@ def export_tax_report():
                 Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
             ).group_by(Account.id).all()
             
-            writer.writerow(['Donor Contribution Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Donor Name', 'Total Gifts (GHS)', 'Cash (GHS)', 'Non-Cash (GHS)', 'Statements'])
-            
             for contribution in donor_contributions:
+                total = float(contribution.total) if contribution.total else 0.0
                 writer.writerow([
                     contribution.name,
-                    f'{contribution.total:,.2f}',
-                    f'{contribution.total:,.2f}',
+                    f'{total:,.2f}',
+                    f'{total:,.2f}',
                     '0.00',
                     '1'
                 ])
         
         elif report_type == '1099':
+            writer.writerow(['1099 Contractor Report'])
+            writer.writerow([f'Year: {year}'])
+            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
+            writer.writerow([])
+            writer.writerow(['Contractor Name', 'EIN', 'Amount (GHS)', 'Reportable'])
+            
             contractors = db.session.query(
                 Account.name,
                 func.sum(JournalLine.debit).label('total')
@@ -3009,21 +3033,18 @@ def export_tax_report():
                 Account.category == 'Contractor'
             ).group_by(Account.id).having(func.sum(JournalLine.debit) >= 600).all()
             
-            writer.writerow(['1099 Contractor Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Contractor Name', 'EIN', 'Amount (GHS)', 'Reportable'])
-            
             for contractor in contractors:
+                total = float(contractor.total) if contractor.total else 0.0
                 writer.writerow([
                     contractor.name,
                     'XXX-XX-XXXX',
-                    f'{contractor.total:,.2f}',
-                    'Yes' if contractor.total >= 600 else 'No'
+                    f'{total:,.2f}',
+                    'Yes' if total >= 600 else 'No'
                 ])
         
         output.seek(0)
+        
+        # Create response with CSV content
         response = make_response(output.getvalue())
         response.headers['Content-Type'] = 'text/csv'
         response.headers['Content-Disposition'] = f'attachment; filename=tax_report_{report_type}_{year}.csv'
@@ -3034,8 +3055,7 @@ def export_tax_report():
         logger.error(f"Error exporting tax report: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
+    
 # ==================== FINANCIAL STATEMENTS WITH BUDGET ====================
 
 @accounting_bp.route('/financial-statements-with-budget', methods=['GET'])

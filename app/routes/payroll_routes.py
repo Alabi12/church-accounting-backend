@@ -1778,8 +1778,8 @@ Church Accounting Team
         logger.error(f"Error emailing payslips: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-        
-           
+
+
 @payroll_bp.route('/payslips/<int:payslip_id>/email', methods=['POST'])
 @token_required
 def email_single_payslip(payslip_id):
@@ -1854,5 +1854,266 @@ def get_payroll_runs_with_filters():
         
     except Exception as e:
         logger.error(f"Error getting payroll runs: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@payroll_bp.route('/runs/<int:run_id>/post-journal', methods=['POST'])
+@token_required
+def post_payroll_journal(run_id):
+    """Post payroll run to general ledger"""
+    try:
+        from app.models import JournalEntry, JournalLine, Account
+        from datetime import datetime
+        from flask import jsonify, make_response
+        
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        
+        # Get the payroll run
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
+        
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
+        
+        # Check if already posted
+        if payroll_run.status in ['PROCESSED', 'POSTED']:
+            return jsonify({'error': 'Payroll run already posted to ledger'}), 400
+        
+        # Check if approved
+        if payroll_run.status != 'APPROVED':
+            return jsonify({'error': f'Cannot post payroll run with status: {payroll_run.status}. Must be APPROVED first.'}), 400
+        
+        # Get salary expense account (Staff Cost)
+        salary_account = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'EXPENSE',
+            Account.is_active == True,
+            db.or_(
+                Account.account_code == '5030',
+                Account.name.ilike('%staff%'),
+                Account.name.ilike('%salary%')
+            )
+        ).first()
+        
+        if not salary_account:
+            # Create a default salary expense account
+            salary_account = Account(
+                church_id=church_id,
+                account_code='5030',
+                name='Staff Cost',
+                display_name='5030 - Staff Cost',
+                account_type='EXPENSE',
+                category='Staff Cost',
+                level=2,
+                opening_balance=0,
+                current_balance=0,
+                normal_balance='debit',
+                description='Staff salaries and wages',
+                is_active=True
+            )
+            db.session.add(salary_account)
+            db.session.flush()
+            print("✅ Created default salary expense account")
+        
+        # Get cash/bank account for payment
+        cash_account = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'ASSET',
+            Account.is_active == True,
+            db.or_(
+                Account.account_code == '1010',
+                Account.name.ilike('%cash%'),
+                Account.name.ilike('%bank%')
+            )
+        ).first()
+        
+        if not cash_account:
+            # Create a default cash account
+            cash_account = Account(
+                church_id=church_id,
+                account_code='1010',
+                name='Cash',
+                display_name='1010 - Cash',
+                account_type='ASSET',
+                category='Cash',
+                level=2,
+                opening_balance=0,
+                current_balance=0,
+                normal_balance='debit',
+                description='Cash on hand',
+                is_active=True
+            )
+            db.session.add(cash_account)
+            db.session.flush()
+            print("✅ Created default cash account")
+        
+        # Get SSNIT Payable account
+        ssnit_payable = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'LIABILITY',
+            Account.is_active == True,
+            db.or_(
+                Account.account_code == '2050',
+                Account.name.ilike('%ssnit%')
+            )
+        ).first()
+        
+        if not ssnit_payable:
+            # Create default SSNIT Payable account
+            ssnit_payable = Account(
+                church_id=church_id,
+                account_code='2050',
+                name='SSNIT Payable',
+                display_name='2050 - SSNIT Payable',
+                account_type='LIABILITY',
+                category='Statutory',
+                level=2,
+                opening_balance=0,
+                current_balance=0,
+                normal_balance='credit',
+                description='SSNIT contributions payable to SSNIT',
+                is_active=True
+            )
+            db.session.add(ssnit_payable)
+            db.session.flush()
+            print("✅ Created default SSNIT Payable account")
+        
+        # Get PAYE Payable account
+        paye_payable = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'LIABILITY',
+            Account.is_active == True,
+            db.or_(
+                Account.account_code == '2040',
+                Account.name.ilike('%paye%')
+            )
+        ).first()
+        
+        if not paye_payable:
+            # Create default PAYE Payable account
+            paye_payable = Account(
+                church_id=church_id,
+                account_code='2040',
+                name='PAYE Payable',
+                display_name='2040 - PAYE Payable',
+                account_type='LIABILITY',
+                category='Taxes',
+                level=2,
+                opening_balance=0,
+                current_balance=0,
+                normal_balance='credit',
+                description='PAYE tax payable to GRA',
+                is_active=True
+            )
+            db.session.add(paye_payable)
+            db.session.flush()
+            print("✅ Created default PAYE Payable account")
+        
+        # Calculate totals
+        lines = PayrollLine.query.filter_by(payroll_run_id=payroll_run.id).all()
+        
+        total_gross = sum(float(line.gross_earnings) for line in lines)
+        total_ssnit = sum(float(line.ssnit_employee) for line in lines)
+        total_paye = sum(float(line.paye_tax) for line in lines)
+        total_net = sum(float(line.net_pay) for line in lines)
+        
+        print(f"Payroll totals - Gross: {total_gross}, SSNIT: {total_ssnit}, PAYE: {total_paye}, Net: {total_net}")
+        
+        # Create journal entry
+        entry_date = datetime.utcnow().date()
+        year = entry_date.year
+        month = entry_date.month
+        count = JournalEntry.query.filter(
+            JournalEntry.entry_number.like(f'JE-{year}-{month:02d}%')
+        ).count() + 1
+        entry_number = f"JE-{year}-{month:02d}-{count:03d}"
+        
+        journal_entry = JournalEntry(
+            church_id=church_id,
+            entry_number=entry_number,
+            entry_date=entry_date,
+            description=f"Payroll for {payroll_run.period_start.strftime('%B %Y')} - Run: {payroll_run.run_number}",
+            status='POSTED',
+            created_by=current_user.id if current_user else None,
+            posted_by=current_user.id if current_user else None,
+            posted_at=datetime.utcnow()
+        )
+        
+        db.session.add(journal_entry)
+        db.session.flush()
+        
+        # Add journal lines
+        # Line 1: Salary Expense (Debit)
+        line1 = JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=salary_account.id,
+            debit=total_gross,
+            credit=0,
+            description=f"Gross salary for {payroll_run.period_start.strftime('%B %Y')}"
+        )
+        db.session.add(line1)
+        
+        # Line 2: Cash/Bank (Credit - Net Pay)
+        line2 = JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=cash_account.id,
+            debit=0,
+            credit=total_net,
+            description=f"Net salary payment for {payroll_run.period_start.strftime('%B %Y')}"
+        )
+        db.session.add(line2)
+        
+        # Line 3: SSNIT Payable (Credit)
+        if total_ssnit > 0:
+            line3 = JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=ssnit_payable.id,
+                debit=0,
+                credit=total_ssnit,
+                description=f"SSNIT contribution for {payroll_run.period_start.strftime('%B %Y')}"
+            )
+            db.session.add(line3)
+        
+        # Line 4: PAYE Payable (Credit)
+        if total_paye > 0:
+            line4 = JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=paye_payable.id,
+                debit=0,
+                credit=total_paye,
+                description=f"PAYE tax for {payroll_run.period_start.strftime('%B %Y')}"
+            )
+            db.session.add(line4)
+        
+        # Update payroll run
+        payroll_run.status = 'PROCESSED'
+        payroll_run.processed_by = current_user.id if current_user else None
+        payroll_run.processed_at = datetime.utcnow()
+        payroll_run.journal_entry_id = journal_entry.id
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Payroll posted to ledger successfully',
+            'journal_entry': {
+                'id': journal_entry.id,
+                'entry_number': journal_entry.entry_number,
+                'description': journal_entry.description,
+                'total_debit': total_gross,
+                'total_credit': total_gross
+            },
+            'run': {
+                'id': payroll_run.id,
+                'run_number': payroll_run.run_number,
+                'status': payroll_run.status
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error posting payroll journal: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
