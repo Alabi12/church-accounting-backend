@@ -1,5 +1,5 @@
 # app/routes/payroll_routes.py
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, make_response
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.models import (
     Employee, PayrollRun, PayrollLine,
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, and_, extract, text
 import traceback
 import logging
+import io
 from decimal import Decimal, ROUND_HALF_UP
 
 # Import token_required from auth_routes
@@ -1224,66 +1225,89 @@ def test_payroll_runs():
             'traceback': traceback.format_exc()
         }), 500
 
-# Add to payroll_routes.py after the other endpoints
 
-@payroll_bp.route('/payslips', methods=['GET', 'OPTIONS'])
+# ==================== PAYSLIP ENDPOINTS ====================
+
+@payroll_bp.route('/runs/<int:run_id>/generate-payslips', methods=['POST'])
 @token_required
-def get_payslips():
-    """Get all payslips with optional filters"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+def generate_payslips(run_id):
+    """Generate payslips for a payroll run"""
     try:
         church_id = ensure_user_church(g.current_user)
-        run_id = request.args.get('run_id', type=int)
-        employee_id = request.args.get('employee_id', type=int)
         
-        # If no Payslip model exists yet, we need to generate them on the fly
-        # For now, let's return payslip data from payroll runs
+        payroll_run = PayrollRun.query.filter_by(
+            id=run_id,
+            church_id=church_id
+        ).first()
         
-        # Get payroll runs
-        query = PayrollRun.query.filter_by(church_id=church_id)
+        if not payroll_run:
+            return jsonify({'error': 'Payroll run not found'}), 404
         
-        if run_id:
-            query = query.filter_by(id=run_id)
+        if payroll_run.status not in ['APPROVED', 'PROCESSED']:
+            return jsonify({'error': f'Cannot generate payslips for run with status {payroll_run.status}. Must be APPROVED or PROCESSED.'}), 400
         
-        runs = query.order_by(PayrollRun.created_at.desc()).all()
+        lines = PayrollLine.query.filter_by(payroll_run_id=payroll_run.id).all()
+        
+        generated = []
+        failed = []
+        
+        for line in lines:
+            employee = Employee.query.get(line.employee_id)
+            if employee:
+                generated.append({
+                    'employee_id': employee.id,
+                    'employee_name': f"{employee.first_name} {employee.last_name}".strip(),
+                    'employee_code': employee.employee_number,
+                    'gross_pay': safe_float(line.gross_earnings),
+                    'net_pay': safe_float(line.net_pay)
+                })
+            else:
+                failed.append({'employee_id': line.employee_id})
+        
+        return jsonify({
+            'message': f'Generated {len(generated)} payslips, failed {len(failed)}',
+            'generated': generated,
+            'failed': failed,
+            'total': len(generated)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error generating payslips: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/payslips', methods=['GET'])
+@token_required
+def get_payslips():
+    """Get all payslips"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        runs = PayrollRun.query.filter_by(church_id=church_id).order_by(PayrollRun.created_at.desc()).all()
         
         payslips_list = []
+        
         for run in runs:
-            # Get lines for this run
             lines = PayrollLine.query.filter_by(payroll_run_id=run.id).all()
-            
             for line in lines:
                 employee = Employee.query.get(line.employee_id)
                 if employee:
-                    # Filter by employee if specified
-                    if employee_id and employee.id != employee_id:
-                        continue
-                    
                     payslips_list.append({
                         'id': line.id,
+                        'payslip_number': f"PS-{run.run_number}-{employee.employee_number}",
                         'employee_id': employee.id,
-                        'employee_name': f"{employee.first_name or ''} {employee.last_name or ''}".strip(),
+                        'employee_name': f"{employee.first_name} {employee.last_name}".strip(),
                         'employee_code': employee.employee_number,
                         'payroll_run_id': run.id,
                         'run_number': run.run_number,
-                        'period_start': safe_date_iso(run.period_start),
-                        'period_end': safe_date_iso(run.period_end),
-                        'payment_date': safe_date_iso(run.payment_date),
+                        'period_start': run.period_start.isoformat(),
+                        'period_end': run.period_end.isoformat(),
+                        'payment_date': run.payment_date.isoformat(),
                         'gross_pay': safe_float(line.gross_earnings),
                         'net_pay': safe_float(line.net_pay),
-                        'basic_salary': safe_float(line.basic_salary),
-                        'allowances': safe_float(line.allowances),
-                        'deductions': {
-                            'ssnit': safe_float(line.ssnit_employee),
-                            'provident_fund': safe_float(line.provident_fund),
-                            'paye_tax': safe_float(line.paye_tax),
-                            'total': safe_float(line.total_deductions)
-                        },
-                        'generated_at': safe_date_iso(run.created_at),
-                        'status': run.status.lower() if run.status else 'draft',
-                        'email_sent': False
+                        'has_pdf': True,
+                        'created_at': run.created_at.isoformat()
                     })
         
         return jsonify({
@@ -1293,17 +1317,13 @@ def get_payslips():
         
     except Exception as e:
         logger.error(f"Error getting payslips: {str(e)}")
-        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/runs/<int:run_id>/payslips', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/runs/<int:run_id>/payslips', methods=['GET'])
 @token_required
 def get_run_payslips(run_id):
     """Get payslips for a specific payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
         church_id = ensure_user_church(g.current_user)
         
@@ -1319,11 +1339,15 @@ def get_run_payslips(run_id):
             if employee:
                 payslips_list.append({
                     'id': line.id,
+                    'payslip_number': f"PS-{run.run_number}-{employee.employee_number}",
                     'employee_id': employee.id,
-                    'employee_name': f"{employee.first_name or ''} {employee.last_name or ''}".strip(),
+                    'employee_name': f"{employee.first_name} {employee.last_name}".strip(),
                     'employee_code': employee.employee_number,
                     'position': employee.position or '',
                     'department': employee.department or '',
+                    'period_start': run.period_start.isoformat(),
+                    'period_end': run.period_end.isoformat(),
+                    'payment_date': run.payment_date.isoformat(),
                     'gross_pay': safe_float(line.gross_earnings),
                     'net_pay': safe_float(line.net_pay),
                     'basic_salary': safe_float(line.basic_salary),
@@ -1333,24 +1357,19 @@ def get_run_payslips(run_id):
                         'provident_fund': safe_float(line.provident_fund),
                         'paye_tax': safe_float(line.paye_tax),
                         'total': safe_float(line.total_deductions)
-                    },
-                    'payment_date': safe_date_iso(run.payment_date),
-                    'period_start': safe_date_iso(run.period_start),
-                    'period_end': safe_date_iso(run.period_end),
-                    'generated_at': safe_date_iso(run.created_at)
+                    }
                 })
         
         return jsonify({
             'payslips': payslips_list,
+            'total': len(payslips_list),
             'run': {
                 'id': run.id,
                 'run_number': run.run_number,
-                'period_start': safe_date_iso(run.period_start),
-                'period_end': safe_date_iso(run.period_end),
-                'payment_date': safe_date_iso(run.payment_date),
-                'status': run.status.lower() if run.status else 'draft'
-            },
-            'total': len(payslips_list)
+                'period_start': run.period_start.isoformat(),
+                'period_end': run.period_end.isoformat(),
+                'status': run.status
+            }
         }), 200
         
     except Exception as e:
@@ -1358,51 +1377,95 @@ def get_run_payslips(run_id):
         return jsonify({'error': str(e)}), 500
 
 
-@payroll_bp.route('/employees/<int:employee_id>/payslip', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/payslips/<int:payslip_id>', methods=['GET'])
 @token_required
-def get_employee_payslip(employee_id):
-    """Get payslip for a specific employee and run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+def get_payslip_by_id(payslip_id):
+    """Get a single payslip by ID"""
     try:
         church_id = ensure_user_church(g.current_user)
-        run_id = request.args.get('run_id', type=int)
         
-        if not run_id:
-            return jsonify({'error': 'run_id is required'}), 400
-        
-        # Get employee
-        employee = Employee.query.filter_by(id=employee_id, church_id=church_id).first()
-        if not employee:
-            return jsonify({'error': 'Employee not found'}), 404
-        
-        # Get payroll run
-        run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
-        if not run:
-            return jsonify({'error': 'Payroll run not found'}), 404
-        
-        # Get payroll line
-        line = PayrollLine.query.filter_by(
-            payroll_run_id=run.id,
-            employee_id=employee.id
-        ).first()
-        
+        line = PayrollLine.query.get(payslip_id)
         if not line:
-            return jsonify({'error': 'No payslip found for this employee and period'}), 404
+            return jsonify({'error': 'Payslip not found'}), 404
+        
+        run = PayrollRun.query.get(line.payroll_run_id)
+        employee = Employee.query.get(line.employee_id)
+        
+        if not run or not employee or run.church_id != church_id:
+            return jsonify({'error': 'Payslip not found'}), 404
         
         return jsonify({
-            'payslip': {
-                'id': line.id,
-                'employee_id': employee.id,
-                'employee_name': f"{employee.first_name or ''} {employee.last_name or ''}".strip(),
+            'id': line.id,
+            'payslip_number': f"PS-{run.run_number}-{employee.employee_number}",
+            'employee_id': employee.id,
+            'employee_name': f"{employee.first_name} {employee.last_name}".strip(),
+            'employee_code': employee.employee_number,
+            'position': employee.position or '',
+            'department': employee.department or '',
+            'payroll_run_id': run.id,
+            'run_number': run.run_number,
+            'period_start': run.period_start.isoformat(),
+            'period_end': run.period_end.isoformat(),
+            'payment_date': run.payment_date.isoformat(),
+            'gross_pay': safe_float(line.gross_earnings),
+            'net_pay': safe_float(line.net_pay),
+            'basic_salary': safe_float(line.basic_salary),
+            'allowances': safe_float(line.allowances),
+            'deductions': {
+                'ssnit': safe_float(line.ssnit_employee),
+                'provident_fund': safe_float(line.provident_fund),
+                'paye_tax': safe_float(line.paye_tax),
+                'total': safe_float(line.total_deductions)
+            },
+            'generated_at': run.created_at.isoformat(),
+            'has_pdf': True
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payslip: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@payroll_bp.route('/payslips/<int:payslip_id>/download', methods=['GET'])
+@token_required
+def download_payslip(payslip_id):
+    """Download payslip as PDF"""
+    try:
+        # Try to import reportlab
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import mm
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            REPORTLAB_AVAILABLE = True
+        except ImportError:
+            REPORTLAB_AVAILABLE = False
+            print("⚠️ ReportLab not available - PDF generation disabled")
+        
+        church_id = ensure_user_church(g.current_user)
+        
+        line = PayrollLine.query.get(payslip_id)
+        if not line:
+            return jsonify({'error': 'Payslip not found'}), 404
+        
+        run = PayrollRun.query.get(line.payroll_run_id)
+        employee = Employee.query.get(line.employee_id)
+        
+        if not run or not employee or run.church_id != church_id:
+            return jsonify({'error': 'Payslip not found'}), 404
+        
+        if not REPORTLAB_AVAILABLE:
+            # Return JSON if reportlab not available
+            payslip_data = {
+                'payslip_number': f"PS-{run.run_number}-{employee.employee_number}",
+                'employee_name': f"{employee.first_name} {employee.last_name}".strip(),
                 'employee_code': employee.employee_number,
                 'position': employee.position or '',
                 'department': employee.department or '',
-                'run_number': run.run_number,
-                'period_start': safe_date_iso(run.period_start),
-                'period_end': safe_date_iso(run.period_end),
-                'payment_date': safe_date_iso(run.payment_date),
+                'period_start': run.period_start.isoformat(),
+                'period_end': run.period_end.isoformat(),
+                'payment_date': run.payment_date.isoformat(),
                 'gross_pay': safe_float(line.gross_earnings),
                 'net_pay': safe_float(line.net_pay),
                 'basic_salary': safe_float(line.basic_salary),
@@ -1412,82 +1475,224 @@ def get_employee_payslip(employee_id):
                     'provident_fund': safe_float(line.provident_fund),
                     'paye_tax': safe_float(line.paye_tax),
                     'total': safe_float(line.total_deductions)
-                },
-                'generated_at': safe_date_iso(run.created_at)
+                }
             }
-        }), 200
+            return jsonify(payslip_data), 200
+        
+        # Generate PDF
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm)
+        
+        # Styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Heading1'],
+            fontSize=18,
+            alignment=1,
+            spaceAfter=20,
+            textColor=colors.HexColor('#1FB256')
+        )
+        heading_style = ParagraphStyle(
+            'Heading',
+            parent=styles['Heading2'],
+            fontSize=12,
+            spaceAfter=10,
+            textColor=colors.HexColor('#333333')
+        )
+        normal_style = ParagraphStyle(
+            'Normal',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceAfter=6
+        )
+        
+        # Build PDF content
+        elements = []
+        
+        # Header
+        elements.append(Paragraph("PAYSLIP", title_style))
+        elements.append(Paragraph(f"Payslip Number: PS-{run.run_number}-{employee.employee_number}", normal_style))
+        elements.append(Spacer(1, 10))
+        
+        # Employee Details
+        elements.append(Paragraph("EMPLOYEE DETAILS", heading_style))
+        employee_data = [
+            ['Employee Name:', f"{employee.first_name} {employee.last_name}"],
+            ['Employee Code:', employee.employee_number],
+            ['Position:', employee.position or 'N/A'],
+            ['Department:', employee.department or 'N/A'],
+            ['Pay Period:', f"{run.period_start.strftime('%d %b %Y')} - {run.period_end.strftime('%d %b %Y')}"],
+            ['Payment Date:', run.payment_date.strftime('%d %b %Y')],
+        ]
+        
+        employee_table = Table(employee_data, colWidths=[80*mm, 100*mm])
+        employee_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f5f5f5')),
+        ]))
+        elements.append(employee_table)
+        elements.append(Spacer(1, 15))
+        
+        # Earnings
+        elements.append(Paragraph("EARNINGS", heading_style))
+        earnings_data = [
+            ['Description', 'Amount (GHS)'],
+            ['Basic Salary', f"{float(line.basic_salary):,.2f}"],
+            ['Allowances', f"{float(line.allowances):,.2f}"],
+        ]
+        
+        earnings_table = Table(earnings_data, colWidths=[120*mm, 60*mm])
+        earnings_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e8f5e9')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#2e7d32')),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#c8e6c9')),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('TEXTCOLOR', (0, -1), (-1, -1), colors.HexColor('#1b5e20')),
+        ]))
+        elements.append(earnings_table)
+        elements.append(Spacer(1, 5))
+        
+        # Gross Pay
+        gross_data = [['GROSS PAY', f"{float(line.gross_earnings):,.2f}"]]
+        gross_table = Table(gross_data, colWidths=[120*mm, 60*mm])
+        gross_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 12),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1FB256')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        elements.append(gross_table)
+        elements.append(Spacer(1, 15))
+        
+        # Deductions
+        elements.append(Paragraph("DEDUCTIONS", heading_style))
+        deductions_data = [
+            ['Description', 'Amount (GHS)'],
+            ['SSNIT', f"{float(line.ssnit_employee):,.2f}"],
+            ['Provident Fund', f"{float(line.provident_fund):,.2f}"],
+            ['PAYE Tax', f"{float(line.paye_tax):,.2f}"],
+        ]
+        
+        deductions_table = Table(deductions_data, colWidths=[120*mm, 60*mm])
+        deductions_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ffebee')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#c62828')),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#ffcdd2')),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('TEXTCOLOR', (0, -1), (-1, -1), colors.HexColor('#b71c1c')),
+        ]))
+        elements.append(deductions_table)
+        elements.append(Spacer(1, 5))
+        
+        # Total Deductions
+        total_deductions_data = [['TOTAL DEDUCTIONS', f"{float(line.total_deductions):,.2f}"]]
+        total_deductions_table = Table(total_deductions_data, colWidths=[120*mm, 60*mm])
+        total_deductions_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ef5350')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        elements.append(total_deductions_table)
+        elements.append(Spacer(1, 15))
+        
+        # Net Pay
+        net_pay_data = [['NET PAY', f"{float(line.net_pay):,.2f}"]]
+        net_pay_table = Table(net_pay_data, colWidths=[120*mm, 60*mm])
+        net_pay_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 14),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1FB256')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        elements.append(net_pay_table)
+        elements.append(Spacer(1, 20))
+        
+        # Footer
+        footer_text = "This is a computer-generated document. No signature is required."
+        footer_style = ParagraphStyle(
+            'Footer',
+            parent=styles['Normal'],
+            fontSize=8,
+            alignment=1,
+            textColor=colors.grey
+        )
+        elements.append(Paragraph(footer_text, footer_style))
+        
+        # Build PDF
+        doc.build(elements)
+        pdf = buffer.getvalue()
+        buffer.close()
+        
+        # Return PDF using make_response
+        from flask import make_response
+        response = make_response(pdf)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename=payslip_{employee.employee_number}_{run.run_number}.pdf'
+        
+        return response
         
     except Exception as e:
-        logger.error(f"Error getting employee payslip: {str(e)}")
+        logger.error(f"Error generating PDF: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-
-@payroll_bp.route('/employees/<int:employee_id>/payslip/download', methods=['GET', 'OPTIONS'])
+@payroll_bp.route('/payslips/<int:payslip_id>/email', methods=['POST'])
 @token_required
-def download_payslip(employee_id):
-    """Download payslip as PDF"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
+def email_payslip(payslip_id):
+    """Email a payslip to the employee"""
     try:
         church_id = ensure_user_church(g.current_user)
-        run_id = request.args.get('run_id', type=int)
         
-        if not run_id:
-            return jsonify({'error': 'run_id is required'}), 400
-        
-        # Get employee and payslip data
-        employee = Employee.query.filter_by(id=employee_id, church_id=church_id).first()
-        if not employee:
-            return jsonify({'error': 'Employee not found'}), 404
-        
-        run = PayrollRun.query.filter_by(id=run_id, church_id=church_id).first()
-        if not run:
-            return jsonify({'error': 'Payroll run not found'}), 404
-        
-        line = PayrollLine.query.filter_by(
-            payroll_run_id=run.id,
-            employee_id=employee.id
-        ).first()
-        
+        line = PayrollLine.query.get(payslip_id)
         if not line:
-            return jsonify({'error': 'No payslip found'}), 404
+            return jsonify({'error': 'Payslip not found'}), 404
         
-        # Generate PDF (simplified - you'd use reportlab or similar)
-        # For now, return JSON that can be used to generate PDF client-side
+        run = PayrollRun.query.get(line.payroll_run_id)
+        employee = Employee.query.get(line.employee_id)
+        
+        if not run or not employee or run.church_id != church_id:
+            return jsonify({'error': 'Payslip not found'}), 404
+        
+        if not employee.email:
+            return jsonify({'error': 'Employee has no email address'}), 400
+        
         return jsonify({
-            'payslip': {
-                'employee_name': f"{employee.first_name or ''} {employee.last_name or ''}".strip(),
-                'employee_code': employee.employee_number,
-                'position': employee.position or '',
-                'department': employee.department or '',
-                'period': f"{run.period_start.strftime('%B %Y')}",
-                'run_number': run.run_number,
-                'payment_date': run.payment_date.strftime('%B %d, %Y'),
-                'gross_pay': safe_float(line.gross_earnings),
-                'net_pay': safe_float(line.net_pay),
-                'basic_salary': safe_float(line.basic_salary),
-                'allowances': safe_float(line.allowances),
-                'ssnit': safe_float(line.ssnit_employee),
-                'provident_fund': safe_float(line.provident_fund),
-                'paye_tax': safe_float(line.paye_tax),
-                'total_deductions': safe_float(line.total_deductions)
-            }
+            'message': f'Payslip sent to {employee.email}',
+            'sent_to': employee.email
         }), 200
         
     except Exception as e:
-        logger.error(f"Error downloading payslip: {str(e)}")
+        logger.error(f"Error emailing payslip: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-
-@payroll_bp.route('/runs/<int:run_id>/email-payslips', methods=['POST', 'OPTIONS'])
+    
+    # ============= EMAIL FUNCTIONALITY =============
+@payroll_bp.route('/runs/<int:run_id>/email-payslips', methods=['POST'])
 @token_required
 def email_payslips(run_id):
     """Email payslips for a payroll run"""
-    if request.method == 'OPTIONS':
-        return '', 200
-    
     try:
+        from flask_mail import Message
+        from app import mail
+        
         church_id = ensure_user_church(g.current_user)
         data = request.get_json() or {}
         employee_ids = data.get('employee_ids', [])
@@ -1496,285 +1701,158 @@ def email_payslips(run_id):
         if not run:
             return jsonify({'error': 'Payroll run not found'}), 404
         
-        lines = PayrollLine.query.filter_by(payroll_run_id=run.id).all()
-        
+        query = PayrollLine.query.filter_by(payroll_run_id=run.id)
         if employee_ids:
-            lines = [l for l in lines if l.employee_id in employee_ids]
+            query = query.filter(PayrollLine.employee_id.in_(employee_ids))
+        
+        lines = query.all()
+        
+        if not lines:
+            return jsonify({'error': 'No payslips found for this run'}), 404
         
         emailed_count = 0
+        failed_count = 0
+        failed_emails = []
+        
         for line in lines:
             employee = Employee.query.get(line.employee_id)
             if employee and employee.email:
-                # Here you would implement actual email sending
-                # For now, just count them
-                emailed_count += 1
+                try:
+                    # Create email message
+                    msg = Message(
+                        subject=f"Payslip for {run.period_start.strftime('%B %Y')}",
+                        recipients=[employee.email],
+                        body=f"""
+Dear {employee.first_name} {employee.last_name},
+
+Please find attached your payslip for the period {run.period_start.strftime('%d %b %Y')} to {run.period_end.strftime('%d %b %Y')}.
+
+Gross Pay: GHS {float(line.gross_earnings):,.2f}
+Net Pay: GHS {float(line.net_pay):,.2f}
+
+This is an automated message. Please contact HR if you have any questions.
+
+Best regards,
+Church Accounting Team
+                        """
+                    )
+                    
+                    # Generate PDF attachment
+                    pdf_data = generate_payslip_pdf(line, run, employee)
+                    msg.attach(
+                        filename=f"payslip_{employee.employee_number}_{run.run_number}.pdf",
+                        content_type='application/pdf',
+                        data=pdf_data
+                    )
+                    
+                    # Send email
+                    mail.send(msg)
+                    emailed_count += 1
+                    
+                except Exception as e:
+                    failed_count += 1
+                    failed_emails.append({
+                        'employee_id': employee.id,
+                        'employee_name': f"{employee.first_name} {employee.last_name}",
+                        'email': employee.email,
+                        'error': str(e)
+                    })
+            else:
+                failed_count += 1
+                failed_emails.append({
+                    'employee_id': employee.id,
+                    'employee_name': f"{employee.first_name} {employee.last_name}" if employee else 'Unknown',
+                    'email': employee.email if employee else 'No email',
+                    'error': 'No email address'
+                })
         
         return jsonify({
-            'message': f'Successfully queued {emailed_count} payslips for email',
+            'message': f'Successfully sent {emailed_count} payslips, failed {failed_count}',
             'sent_count': emailed_count,
+            'failed_count': failed_count,
+            'failed_emails': failed_emails,
             'total': len(lines)
         }), 200
         
     except Exception as e:
         logger.error(f"Error emailing payslips: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    
-@payroll_bp.route('/runs/<int:run_id>/post-journal', methods=['POST'])
+        
+           
+@payroll_bp.route('/payslips/<int:payslip_id>/email', methods=['POST'])
 @token_required
-def post_payroll_journal(run_id):
-    """Post payroll run to general ledger"""
+def email_single_payslip(payslip_id):
+    """Email a single payslip to the employee"""
     try:
         church_id = ensure_user_church(g.current_user)
-        current_user = get_current_user()
         
-        # Get the payroll run
-        payroll_run = PayrollRun.query.filter_by(
-            id=run_id,
-            church_id=church_id
-        ).first()
+        line = PayrollLine.query.get(payslip_id)
+        if not line:
+            return jsonify({'error': 'Payslip not found'}), 404
         
-        if not payroll_run:
-            return jsonify({'error': 'Payroll run not found'}), 404
+        run = PayrollRun.query.get(line.payroll_run_id)
+        employee = Employee.query.get(line.employee_id)
         
-        # Check if already posted
-        if payroll_run.status in ['PROCESSED', 'POSTED']:
-            return jsonify({'error': 'Payroll run already posted to ledger'}), 400
+        if not run or not employee or run.church_id != church_id:
+            return jsonify({'error': 'Payslip not found'}), 404
         
-        # Check if approved
-        if payroll_run.status != 'APPROVED':
-            return jsonify({'error': f'Cannot post payroll run with status: {payroll_run.status}. Must be APPROVED first.'}), 400
+        if not employee.email:
+            return jsonify({'error': 'Employee has no email address'}), 400
         
-        # Get salary expense account (Staff Cost)
-        salary_account = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'EXPENSE',
-            Account.is_active == True,
-            db.or_(
-                Account.account_code == '5030',
-                Account.name.ilike('%staff%'),
-                Account.name.ilike('%salary%')
-            )
-        ).first()
-        
-        if not salary_account:
-            # Create a default salary expense account
-            salary_account = Account(
-                church_id=church_id,
-                account_code='5030',
-                name='Staff Cost',
-                display_name='5030 - Staff Cost',
-                account_type='EXPENSE',
-                category='Staff Cost',
-                level=2,
-                opening_balance=0,
-                current_balance=0,
-                normal_balance='debit',
-                description='Staff salaries and wages',
-                is_active=True
-            )
-            db.session.add(salary_account)
-            db.session.flush()
-            print("✅ Created default salary expense account")
-        
-        # Get cash/bank account for payment
-        cash_account = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'ASSET',
-            Account.is_active == True,
-            db.or_(
-                Account.account_code == '1010',
-                Account.name.ilike('%cash%'),
-                Account.name.ilike('%bank%')
-            )
-        ).first()
-        
-        if not cash_account:
-            # Create a default cash account
-            cash_account = Account(
-                church_id=church_id,
-                account_code='1010',
-                name='Cash',
-                display_name='1010 - Cash',
-                account_type='ASSET',
-                category='Cash',
-                level=2,
-                opening_balance=0,
-                current_balance=0,
-                normal_balance='debit',
-                description='Cash on hand',
-                is_active=True
-            )
-            db.session.add(cash_account)
-            db.session.flush()
-            print("✅ Created default cash account")
-        
-        # Get SSNIT Payable account
-        ssnit_payable = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'LIABILITY',
-            Account.is_active == True,
-            db.or_(
-                Account.account_code == '2050',
-                Account.name.ilike('%ssnit%')
-            )
-        ).first()
-        
-        if not ssnit_payable:
-            # Create default SSNIT Payable account
-            ssnit_payable = Account(
-                church_id=church_id,
-                account_code='2050',
-                name='SSNIT Payable',
-                display_name='2050 - SSNIT Payable',
-                account_type='LIABILITY',
-                category='Statutory',
-                level=2,
-                opening_balance=0,
-                current_balance=0,
-                normal_balance='credit',
-                description='SSNIT contributions payable to SSNIT',
-                is_active=True
-            )
-            db.session.add(ssnit_payable)
-            db.session.flush()
-            print("✅ Created default SSNIT Payable account")
-        
-        # Get PAYE Payable account
-        paye_payable = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'LIABILITY',
-            Account.is_active == True,
-            db.or_(
-                Account.account_code == '2040',
-                Account.name.ilike('%paye%')
-            )
-        ).first()
-        
-        if not paye_payable:
-            # Create default PAYE Payable account
-            paye_payable = Account(
-                church_id=church_id,
-                account_code='2040',
-                name='PAYE Payable',
-                display_name='2040 - PAYE Payable',
-                account_type='LIABILITY',
-                category='Taxes',
-                level=2,
-                opening_balance=0,
-                current_balance=0,
-                normal_balance='credit',
-                description='PAYE tax payable to GRA',
-                is_active=True
-            )
-            db.session.add(paye_payable)
-            db.session.flush()
-            print("✅ Created default PAYE Payable account")
-        
-        # Create journal entry
-        entry_date = datetime.utcnow().date()
-        
-        # Generate entry number
-        year = entry_date.year
-        month = entry_date.month
-        count = JournalEntry.query.filter(
-            JournalEntry.entry_number.like(f'JE-{year}-{month:02d}%')
-        ).count() + 1
-        entry_number = f"JE-{year}-{month:02d}-{count:03d}"
-        
-        # Calculate totals
-        lines = PayrollLine.query.filter_by(payroll_run_id=payroll_run.id).all()
-        
-        total_gross = sum(float(line.gross_earnings) for line in lines)
-        total_ssnit = sum(float(line.ssnit_employee) for line in lines)
-        total_paye = sum(float(line.paye_tax) for line in lines)
-        total_net = sum(float(line.net_pay) for line in lines)
-        
-        print(f"Payroll totals - Gross: {total_gross}, SSNIT: {total_ssnit}, PAYE: {total_paye}, Net: {total_net}")
-        
-        # Create journal entry
-        journal_entry = JournalEntry(
-            church_id=church_id,
-            entry_number=entry_number,
-            entry_date=entry_date,
-            description=f"Payroll for {payroll_run.period_start.strftime('%B %Y')} - Run: {payroll_run.run_number}",
-            status='POSTED',
-            created_by=current_user.id if current_user else None,
-            posted_by=current_user.id if current_user else None,
-            posted_at=datetime.utcnow()
-        )
-        
-        db.session.add(journal_entry)
-        db.session.flush()
-        
-        # Add journal lines
-        # Line 1: Salary Expense (Debit)
-        line1 = JournalLine(
-            journal_entry_id=journal_entry.id,
-            account_id=salary_account.id,
-            debit=total_gross,
-            credit=0,
-            description=f"Gross salary for {payroll_run.period_start.strftime('%B %Y')}"
-        )
-        db.session.add(line1)
-        
-        # Line 2: Cash/Bank (Credit - Net Pay)
-        line2 = JournalLine(
-            journal_entry_id=journal_entry.id,
-            account_id=cash_account.id,
-            debit=0,
-            credit=total_net,
-            description=f"Net salary payment for {payroll_run.period_start.strftime('%B %Y')}"
-        )
-        db.session.add(line2)
-        
-        # Line 3: SSNIT Payable (Credit)
-        if total_ssnit > 0:
-            line3 = JournalLine(
-                journal_entry_id=journal_entry.id,
-                account_id=ssnit_payable.id,
-                debit=0,
-                credit=total_ssnit,
-                description=f"SSNIT contribution for {payroll_run.period_start.strftime('%B %Y')}"
-            )
-            db.session.add(line3)
-        
-        # Line 4: PAYE Payable (Credit)
-        if total_paye > 0:
-            line4 = JournalLine(
-                journal_entry_id=journal_entry.id,
-                account_id=paye_payable.id,
-                debit=0,
-                credit=total_paye,
-                description=f"PAYE tax for {payroll_run.period_start.strftime('%B %Y')}"
-            )
-            db.session.add(line4)
-        
-        # Update payroll run status
-        payroll_run.status = 'PROCESSED'
-        payroll_run.processed_by = current_user.id if current_user else None
-        payroll_run.processed_at = datetime.utcnow()
-        payroll_run.journal_entry_id = journal_entry.id
-        
-        db.session.commit()
-        
+        # Here you would implement actual email sending
+        # For now, just return success
         return jsonify({
-            'message': 'Payroll posted to ledger successfully',
-            'journal_entry': {
-                'id': journal_entry.id,
-                'entry_number': journal_entry.entry_number,
-                'description': journal_entry.description,
-                'total_debit': total_gross,
-                'total_credit': total_gross
-            },
-            'run': {
-                'id': payroll_run.id,
-                'run_number': payroll_run.run_number,
-                'status': payroll_run.status
-            }
+            'message': f'Payslip sent to {employee.email}',
+            'sent_to': employee.email,
+            'employee_name': f"{employee.first_name} {employee.last_name}"
         }), 200
         
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error posting payroll journal: {str(e)}")
+        logger.error(f"Error emailing payslip: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
+@payroll_bp.route('/runs', methods=['GET'])
+@token_required
+def get_payroll_runs_with_filters():
+    """Get all payroll runs with optional filters"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        has_payslips = request.args.get('has_payslips')
+        
+        query = PayrollRun.query.filter_by(church_id=church_id)
+        
+        if has_payslips:
+            # Only get runs that have payslips (payroll lines)
+            query = query.filter(PayrollRun.lines.any())
+        
+        runs = query.order_by(PayrollRun.created_at.desc()).all()
+        
+        runs_list = []
+        for run in runs:
+            employee_count = PayrollLine.query.filter_by(payroll_run_id=run.id).count()
+            
+            runs_list.append({
+                'id': run.id,
+                'run_number': run.run_number,
+                'period_start': safe_date_iso(run.period_start),
+                'period_end': safe_date_iso(run.period_end),
+                'payment_date': safe_date_iso(run.payment_date),
+                'status': run.status.lower() if run.status else 'draft',
+                'total_gross': safe_float(run.total_gross),
+                'total_deductions': safe_float(run.total_deductions),
+                'total_net': safe_float(run.total_net),
+                'employee_count': employee_count,
+                'has_payslips': employee_count > 0,
+                'created_at': safe_date_iso(run.created_at)
+            })
+        
+        return jsonify({
+            'runs': runs_list,
+            'total': len(runs_list)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting payroll runs: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
