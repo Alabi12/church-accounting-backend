@@ -7,7 +7,8 @@ import traceback
 import os
 from sqlalchemy import func, or_
 
-from app.models import User, Account, Church, JournalEntry, JournalLine
+from app.models import User, Account, Church, JournalEntry, JournalLine, Employee
+from app.models.leave import LeaveRequest, LeaveBalance, LeaveType
 from app.extensions import db
 from app.routes.auth_routes import token_required
 
@@ -217,8 +218,6 @@ def get_recent_entries():
         return jsonify({'error': str(e)}), 500
 
 
-# ==================== ACCOUNT BALANCE ENDPOINTS ====================
-
 @accounting_bp.route('/account-balances', methods=['GET'])
 @token_required
 def get_account_balances():
@@ -391,8 +390,6 @@ def _get_income_statement(church_id, start_date_str, end_date_str):
     except:
         return jsonify({'error': 'Invalid date format'}), 400
     
-    print(f"\n📊 Income Statement for {start_date} to {end_date}")
-    
     revenue_accounts = Account.query.filter_by(
         church_id=church_id, account_type='REVENUE', is_active=True
     ).order_by(Account.account_code).all()
@@ -402,7 +399,6 @@ def _get_income_statement(church_id, start_date_str, end_date_str):
     for acc in revenue_accounts:
         balance = get_account_balance(acc.id, start_date, end_date)
         if balance != 0:
-            print(f"  {acc.account_code} - {acc.name}: {balance}")
             revenue_data.append({
                 'id': acc.id,
                 'account_code': acc.account_code,
@@ -411,8 +407,6 @@ def _get_income_statement(church_id, start_date_str, end_date_str):
                 'amount': balance
             })
             total_revenue += balance
-    
-    print(f"Total Revenue: {total_revenue}")
     
     expense_accounts = Account.query.filter_by(
         church_id=church_id, account_type='EXPENSE', is_active=True
@@ -431,9 +425,6 @@ def _get_income_statement(church_id, start_date_str, end_date_str):
                 'amount': balance
             })
             total_expense += balance
-    
-    print(f"Total Expenses: {total_expense}")
-    print(f"Net Income: {total_revenue - total_expense}")
     
     return jsonify({
         'title': 'Income Statement',
@@ -527,10 +518,15 @@ def _get_cash_flow_statement(church_id, start_date_str, end_date_str):
         return jsonify({'error': 'Invalid date format'}), 400
     
     cash_accounts = Account.query.filter(
-        Account.church_id == church_id, Account.account_type == 'ASSET',
+        Account.church_id == church_id,
+        Account.account_type == 'ASSET',
         Account.is_active == True,
-        or_(Account.category == 'Cash', Account.category == 'Bank',
-            Account.name.ilike('%cash%'), Account.name.ilike('%bank%'))
+        or_(
+            Account.category == 'Cash',
+            Account.category == 'Bank',
+            Account.name.ilike('%cash%'),
+            Account.name.ilike('%bank%')
+        )
     ).all()
     
     beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
@@ -565,10 +561,15 @@ def _get_receipt_payment_account(church_id, start_date_str, end_date_str):
         return jsonify({'error': 'Invalid date format'}), 400
     
     cash_accounts = Account.query.filter(
-        Account.church_id == church_id, Account.account_type == 'ASSET',
+        Account.church_id == church_id,
+        Account.account_type == 'ASSET',
         Account.is_active == True,
-        or_(Account.category == 'Cash', Account.category == 'Bank',
-            Account.name.ilike('%cash%'), Account.name.ilike('%bank%'))
+        or_(
+            Account.category == 'Cash',
+            Account.category == 'Bank',
+            Account.name.ilike('%cash%'),
+            Account.name.ilike('%bank%')
+        )
     ).all()
     
     revenue_accounts = Account.query.filter_by(church_id=church_id, account_type='REVENUE', is_active=True).all()
@@ -602,1380 +603,6 @@ def _get_receipt_payment_account(church_id, start_date_str, end_date_str):
         'closingBalances': {'cashAccounts': [], 'bankAccounts': [], 'total': closing_balance},
         'netCashFlow': total_receipts - total_payments
     }), 200
-
-
-# ==================== FINANCIAL STATEMENTS EXPORT ====================
-
-@accounting_bp.route('/financial-statements/export', methods=['GET'])
-@token_required
-def export_financial_statement():
-    """Export financial statement as CSV"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        statement_type = request.args.get('type', 'income').lower()
-        start_date_str = request.args.get('startDate')
-        end_date_str = request.args.get('endDate')
-        format_type = request.args.get('format', 'csv').lower()
-        
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        if statement_type in ['income', 'income-statement']:
-            if not start_date_str or not end_date_str:
-                return jsonify({'error': 'Start date and end date required'}), 400
-            
-            try:
-                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-            except:
-                return jsonify({'error': 'Invalid date format'}), 400
-            
-            return _export_income_statement(church_id, start_date, end_date, start_date_str, end_date_str, writer, output)
-        
-        elif statement_type in ['balance', 'balance-sheet']:
-            if not end_date_str:
-                return jsonify({'error': 'End date required for balance sheet'}), 400
-            
-            try:
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-            except:
-                return jsonify({'error': 'Invalid date format'}), 400
-            
-            return _export_balance_sheet(church_id, end_date, end_date_str, writer, output)
-        
-        elif statement_type in ['cashflow', 'cash-flow']:
-            if not start_date_str or not end_date_str:
-                return jsonify({'error': 'Start date and end date required'}), 400
-            
-            try:
-                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-            except:
-                return jsonify({'error': 'Invalid date format'}), 400
-            
-            return _export_cashflow(church_id, start_date, end_date, start_date_str, end_date_str, writer, output)
-        
-        elif statement_type in ['receipt', 'receipt-payment']:
-            if not start_date_str or not end_date_str:
-                return jsonify({'error': 'Start date and end date required'}), 400
-            
-            try:
-                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-            except:
-                return jsonify({'error': 'Invalid date format'}), 400
-            
-            return _export_receipt_payment(church_id, start_date, end_date, start_date_str, end_date_str, writer, output)
-        
-        else:
-            return jsonify({'error': f'Invalid statement type: {statement_type}'}), 400
-            
-    except Exception as e:
-        logger.error(f"Error exporting financial statement: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-def _export_income_statement(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export income statement as CSV"""
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    revenue_data = []
-    total_revenue = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            revenue_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_revenue += balance
-    
-    expense_data = []
-    total_expense = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            expense_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_expense += balance
-    
-    writer.writerow(['INCOME STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['INCOME'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in revenue_data:
-        writer.writerow([
-            item.get('category', 'Revenue'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL INCOME', '', '', f"{total_revenue:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EXPENSES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in expense_data:
-        writer.writerow([
-            item.get('category', 'Expense'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EXPENSES', '', '', f"{total_expense:,.2f}"])
-    writer.writerow([])
-    
-    net_income = total_revenue - total_expense
-    writer.writerow(['NET INCOME', '', '', f"{net_income:,.2f}"])
-    writer.writerow(['STATUS', '', '', 'SURPLUS' if net_income >= 0 else 'DEFICIT'])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=income_statement_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-def _export_balance_sheet(church_id, end_date, end_date_str, writer, output):
-    """Export balance sheet as CSV"""
-    asset_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='ASSET', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    liability_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='LIABILITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    equity_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EQUITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    assets_data = []
-    total_assets = 0
-    for acc in asset_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        assets_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_assets += balance
-    
-    liabilities_data = []
-    total_liabilities = 0
-    for acc in liability_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        liabilities_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_liabilities += balance
-    
-    equity_data = []
-    total_equity = 0
-    for acc in equity_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        equity_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_equity += balance
-    
-    writer.writerow(['BALANCE SHEET'])
-    writer.writerow([f'As at: {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['ASSETS'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in assets_data:
-        writer.writerow([
-            item.get('category', 'Assets'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL ASSETS', '', '', f"{total_assets:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['LIABILITIES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in liabilities_data:
-        writer.writerow([
-            item.get('category', 'Liabilities'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL LIABILITIES', '', '', f"{total_liabilities:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EQUITY'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in equity_data:
-        writer.writerow([
-            item.get('category', 'Equity'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EQUITY', '', '', f"{total_equity:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['TOTAL LIABILITIES & EQUITY', '', '', f"{total_liabilities + total_equity:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=balance_sheet_{end_date_str}.csv'
-    
-    return response
-
-
-def _export_cashflow(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export cash flow statement as CSV"""
-    cash_accounts = Account.query.filter(
-        Account.church_id == church_id,
-        Account.account_type == 'ASSET',
-        Account.is_active == True,
-        or_(
-            Account.category == 'Cash',
-            Account.category == 'Bank',
-            Account.name.ilike('%cash%'),
-            Account.name.ilike('%bank%')
-        )
-    ).all()
-    
-    beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-    ending_cash = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-    
-    revenue_accounts = Account.query.filter_by(church_id=church_id, account_type='REVENUE', is_active=True).all()
-    expense_accounts = Account.query.filter_by(church_id=church_id, account_type='EXPENSE', is_active=True).all()
-    
-    net_income = sum(get_account_balance(acc.id, start_date, end_date) for acc in revenue_accounts) - \
-                 sum(get_account_balance(acc.id, start_date, end_date) for acc in expense_accounts)
-    
-    writer.writerow(['CASH FLOW STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['Net Income', f"{net_income:,.2f}"])
-    writer.writerow(['Net Cash from Operating Activities', f"{net_income:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No investing activities', '0.00'])
-    writer.writerow(['Net Cash from Investing Activities', '0.00'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No financing activities', '0.00'])
-    writer.writerow(['Net Cash from Financing Activities', '0.00'])
-    writer.writerow([])
-    
-    net_increase = ending_cash - beginning_cash
-    writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{net_increase:,.2f}"])
-    writer.writerow(['Cash at Beginning of Period', f"{beginning_cash:,.2f}"])
-    writer.writerow(['Cash at End of Period', f"{ending_cash:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=cash_flow_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-def _export_receipt_payment(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export receipt and payment account as CSV"""
-    cash_accounts = Account.query.filter(
-        Account.church_id == church_id,
-        Account.account_type == 'ASSET',
-        Account.is_active == True,
-        or_(
-            Account.category == 'Cash',
-            Account.category == 'Bank',
-            Account.name.ilike('%cash%'),
-            Account.name.ilike('%bank%')
-        )
-    ).all()
-    
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    receipts = []
-    total_receipts = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance > 0:
-            receipts.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_receipts += balance
-    
-    payments = []
-    total_payments = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance > 0:
-            payments.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_payments += balance
-    
-    opening_balance = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-    closing_balance = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-    
-    writer.writerow(['RECEIPT AND PAYMENT ACCOUNT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['OPENING BALANCE'])
-    writer.writerow(['Account', 'Amount (GHS)'])
-    for acc in cash_accounts:
-        balance = get_account_balance(acc.id, None, start_date - timedelta(days=1))
-        writer.writerow([acc.name, f"{balance:,.2f}"])
-    writer.writerow(['TOTAL OPENING BALANCE', f"{opening_balance:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['RECEIPTS'])
-    writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-    for item in receipts:
-        writer.writerow([
-            item['account_code'],
-            item['name'],
-            item.get('category', 'Receipts'),
-            f"{item['amount']:,.2f}"
-        ])
-    writer.writerow(['TOTAL RECEIPTS', '', '', f"{total_receipts:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['PAYMENTS'])
-    writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-    for item in payments:
-        writer.writerow([
-            item['account_code'],
-            item['name'],
-            item.get('category', 'Payments'),
-            f"{item['amount']:,.2f}"
-        ])
-    writer.writerow(['TOTAL PAYMENTS', '', '', f"{total_payments:,.2f}"])
-    writer.writerow([])
-    
-    net_cash_flow = total_receipts - total_payments
-    writer.writerow(['NET CASH FLOW', '', '', f"{net_cash_flow:,.2f}"])
-    writer.writerow(['CLOSING BALANCE', '', '', f"{closing_balance:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=receipt_payment_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-def export_income_statement_csv(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export income statement as CSV"""
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    revenue_data = []
-    total_revenue = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            revenue_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_revenue += balance
-    
-    expense_data = []
-    total_expense = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            expense_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_expense += balance
-    
-    writer.writerow(['INCOME STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['INCOME'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in revenue_data:
-        writer.writerow([
-            item.get('category', 'Revenue'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL INCOME', '', '', f"{total_revenue:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EXPENSES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in expense_data:
-        writer.writerow([
-            item.get('category', 'Expense'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EXPENSES', '', '', f"{total_expense:,.2f}"])
-    writer.writerow([])
-    
-    net_income = total_revenue - total_expense
-    writer.writerow(['NET INCOME', '', '', f"{net_income:,.2f}"])
-    writer.writerow(['STATUS', '', '', 'SURPLUS' if net_income >= 0 else 'DEFICIT'])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=income_statement_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-def export_balance_sheet_csv(church_id, end_date, end_date_str, writer, output):
-    """Export balance sheet as CSV"""
-    asset_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='ASSET', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    liability_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='LIABILITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    equity_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EQUITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    assets_data = []
-    total_assets = 0
-    for acc in asset_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        assets_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_assets += balance
-    
-    liabilities_data = []
-    total_liabilities = 0
-    for acc in liability_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        liabilities_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_liabilities += balance
-    
-    equity_data = []
-    total_equity = 0
-    for acc in equity_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        equity_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_equity += balance
-    
-    writer.writerow(['BALANCE SHEET'])
-    writer.writerow([f'As at: {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['ASSETS'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in assets_data:
-        writer.writerow([
-            item.get('category', 'Assets'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL ASSETS', '', '', f"{total_assets:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['LIABILITIES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in liabilities_data:
-        writer.writerow([
-            item.get('category', 'Liabilities'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL LIABILITIES', '', '', f"{total_liabilities:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EQUITY'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in equity_data:
-        writer.writerow([
-            item.get('category', 'Equity'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EQUITY', '', '', f"{total_equity:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['TOTAL LIABILITIES & EQUITY', '', '', f"{total_liabilities + total_equity:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=balance_sheet_{end_date_str}.csv'
-    
-    return response
-
-
-def export_cashflow_csv(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export cash flow statement as CSV"""
-    cash_accounts = Account.query.filter(
-        Account.church_id == church_id,
-        Account.account_type == 'ASSET',
-        Account.is_active == True,
-        or_(
-            Account.category == 'Cash',
-            Account.category == 'Bank',
-            Account.name.ilike('%cash%'),
-            Account.name.ilike('%bank%')
-        )
-    ).all()
-    
-    beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-    ending_cash = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-    
-    revenue_accounts = Account.query.filter_by(church_id=church_id, account_type='REVENUE', is_active=True).all()
-    expense_accounts = Account.query.filter_by(church_id=church_id, account_type='EXPENSE', is_active=True).all()
-    
-    net_income = sum(get_account_balance(acc.id, start_date, end_date) for acc in revenue_accounts) - \
-                 sum(get_account_balance(acc.id, start_date, end_date) for acc in expense_accounts)
-    
-    writer.writerow(['CASH FLOW STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['Net Income', f"{net_income:,.2f}"])
-    writer.writerow(['Net Cash from Operating Activities', f"{net_income:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No investing activities', '0.00'])
-    writer.writerow(['Net Cash from Investing Activities', '0.00'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No financing activities', '0.00'])
-    writer.writerow(['Net Cash from Financing Activities', '0.00'])
-    writer.writerow([])
-    
-    net_increase = ending_cash - beginning_cash
-    writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{net_increase:,.2f}"])
-    writer.writerow(['Cash at Beginning of Period', f"{beginning_cash:,.2f}"])
-    writer.writerow(['Cash at End of Period', f"{ending_cash:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=cashflow_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-@accounting_bp.route('/export/trial-balance', methods=['GET'])
-@token_required
-def export_trial_balance():
-    """Export trial balance as CSV"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        as_at_str = request.args.get('asAt')
-        format_type = request.args.get('format', 'csv').lower()
-        
-        if not as_at_str:
-            as_at_str = datetime.utcnow().date().isoformat()
-        
-        try:
-            as_at = datetime.fromisoformat(as_at_str.replace('Z', '+00:00')).date()
-        except:
-            as_at = datetime.utcnow().date()
-        
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
-        # Get all active accounts
-        accounts = Account.query.filter_by(
-            church_id=church_id,
-            is_active=True
-        ).order_by(Account.account_type, Account.account_code).all()
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write headers
-        writer.writerow(['TRIAL BALANCE'])
-        writer.writerow([f'As at: {as_at_str}'])
-        writer.writerow([])
-        writer.writerow(['Account Code', 'Account Name', 'Account Type', 'Debit (GHS)', 'Credit (GHS)'])
-        
-        total_debits = 0
-        total_credits = 0
-        
-        for acc in accounts:
-            balance = get_account_balance(acc.id, None, as_at)
-            
-            if acc.account_type in ['ASSET', 'EXPENSE']:
-                debit = balance if balance > 0 else 0
-                credit = abs(balance) if balance < 0 else 0
-            else:
-                debit = abs(balance) if balance < 0 else 0
-                credit = balance if balance > 0 else 0
-            
-            total_debits += debit
-            total_credits += credit
-            
-            writer.writerow([
-                acc.account_code,
-                acc.name,
-                acc.account_type,
-                f"{debit:,.2f}" if debit > 0 else '0.00',
-                f"{credit:,.2f}" if credit > 0 else '0.00'
-            ])
-        
-        writer.writerow([])
-        writer.writerow(['TOTAL', '', '', f"{total_debits:,.2f}", f"{total_credits:,.2f}"])
-        writer.writerow(['STATUS', '', '', 'BALANCED' if abs(total_debits - total_credits) < 0.01 else 'NOT BALANCED'])
-        
-        output.seek(0)
-        response = make_response(output.getvalue())
-        response.headers['Content-Type'] = 'text/csv'
-        response.headers['Content-Disposition'] = f'attachment; filename=trial_balance_{as_at_str}.csv'
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error exporting trial balance: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/export/balance-sheet', methods=['GET'])
-@token_required
-def export_balance_sheet():
-    """Export balance sheet as CSV"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        as_at_str = request.args.get('asAt')
-        format_type = request.args.get('format', 'csv').lower()
-        
-        if not as_at_str:
-            as_at_str = datetime.utcnow().date().isoformat()
-        
-        try:
-            as_at = datetime.fromisoformat(as_at_str.replace('Z', '+00:00')).date()
-        except:
-            as_at = datetime.utcnow().date()
-        
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
-        # Get accounts
-        asset_accounts = Account.query.filter_by(
-            church_id=church_id, account_type='ASSET', is_active=True
-        ).order_by(Account.account_code).all()
-        
-        liability_accounts = Account.query.filter_by(
-            church_id=church_id, account_type='LIABILITY', is_active=True
-        ).order_by(Account.account_code).all()
-        
-        equity_accounts = Account.query.filter_by(
-            church_id=church_id, account_type='EQUITY', is_active=True
-        ).order_by(Account.account_code).all()
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Header
-        writer.writerow(['BALANCE SHEET'])
-        writer.writerow([f'As at: {as_at_str}'])
-        writer.writerow([])
-        
-        # Assets
-        writer.writerow(['ASSETS'])
-        writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-        
-        total_assets = 0
-        for acc in asset_accounts:
-            balance = get_account_balance(acc.id, None, as_at)
-            writer.writerow([acc.account_code, acc.name, acc.category or 'Assets', f"{balance:,.2f}"])
-            total_assets += balance
-        
-        writer.writerow(['TOTAL ASSETS', '', '', f"{total_assets:,.2f}"])
-        writer.writerow([])
-        
-        # Liabilities
-        writer.writerow(['LIABILITIES'])
-        writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-        
-        total_liabilities = 0
-        for acc in liability_accounts:
-            balance = get_account_balance(acc.id, None, as_at)
-            writer.writerow([acc.account_code, acc.name, acc.category or 'Liabilities', f"{balance:,.2f}"])
-            total_liabilities += balance
-        
-        writer.writerow(['TOTAL LIABILITIES', '', '', f"{total_liabilities:,.2f}"])
-        writer.writerow([])
-        
-        # Equity
-        writer.writerow(['EQUITY'])
-        writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-        
-        total_equity = 0
-        for acc in equity_accounts:
-            balance = get_account_balance(acc.id, None, as_at)
-            writer.writerow([acc.account_code, acc.name, acc.category or 'Equity', f"{balance:,.2f}"])
-            total_equity += balance
-        
-        writer.writerow(['TOTAL EQUITY', '', '', f"{total_equity:,.2f}"])
-        writer.writerow([])
-        
-        writer.writerow(['TOTAL LIABILITIES & EQUITY', '', '', f"{total_liabilities + total_equity:,.2f}"])
-        
-        output.seek(0)
-        response = make_response(output.getvalue())
-        response.headers['Content-Type'] = 'text/csv'
-        response.headers['Content-Disposition'] = f'attachment; filename=balance_sheet_{as_at_str}.csv'
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error exporting balance sheet: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/export/income-statement', methods=['GET'])
-@token_required
-def export_income_statement():
-    """Export income statement as CSV"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        start_date_str = request.args.get('startDate')
-        end_date_str = request.args.get('endDate')
-        format_type = request.args.get('format', 'csv').lower()
-        
-        if not start_date_str or not end_date_str:
-            return jsonify({'error': 'Start date and end date required'}), 400
-        
-        try:
-            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-        except:
-            return jsonify({'error': 'Invalid date format'}), 400
-        
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
-        # Get accounts
-        revenue_accounts = Account.query.filter_by(
-            church_id=church_id, account_type='REVENUE', is_active=True
-        ).order_by(Account.account_code).all()
-        
-        expense_accounts = Account.query.filter_by(
-            church_id=church_id, account_type='EXPENSE', is_active=True
-        ).order_by(Account.account_code).all()
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Header
-        writer.writerow(['INCOME STATEMENT'])
-        writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-        writer.writerow([])
-        
-        # Revenue
-        writer.writerow(['INCOME'])
-        writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-        
-        total_revenue = 0
-        for acc in revenue_accounts:
-            balance = get_account_balance(acc.id, start_date, end_date)
-            if balance != 0:
-                writer.writerow([acc.account_code, acc.name, acc.category or 'Revenue', f"{balance:,.2f}"])
-                total_revenue += balance
-        
-        writer.writerow(['TOTAL INCOME', '', '', f"{total_revenue:,.2f}"])
-        writer.writerow([])
-        
-        # Expenses
-        writer.writerow(['EXPENSES'])
-        writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-        
-        total_expenses = 0
-        for acc in expense_accounts:
-            balance = get_account_balance(acc.id, start_date, end_date)
-            if balance != 0:
-                writer.writerow([acc.account_code, acc.name, acc.category or 'Expense', f"{balance:,.2f}"])
-                total_expenses += balance
-        
-        writer.writerow(['TOTAL EXPENSES', '', '', f"{total_expenses:,.2f}"])
-        writer.writerow([])
-        
-        net_income = total_revenue - total_expenses
-        writer.writerow(['NET INCOME', '', '', f"{net_income:,.2f}"])
-        writer.writerow(['STATUS', '', '', 'SURPLUS' if net_income >= 0 else 'DEFICIT'])
-        
-        output.seek(0)
-        response = make_response(output.getvalue())
-        response.headers['Content-Type'] = 'text/csv'
-        response.headers['Content-Disposition'] = f'attachment; filename=income_statement_{start_date_str}_to_{end_date_str}.csv'
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error exporting income statement: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/export/cash-flow', methods=['GET'])
-@token_required
-def export_cash_flow():
-    """Export cash flow statement as CSV"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        start_date_str = request.args.get('startDate')
-        end_date_str = request.args.get('endDate')
-        format_type = request.args.get('format', 'csv').lower()
-        
-        if not start_date_str or not end_date_str:
-            return jsonify({'error': 'Start date and end date required'}), 400
-        
-        try:
-            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-        except:
-            return jsonify({'error': 'Invalid date format'}), 400
-        
-        if format_type != 'csv':
-            return jsonify({'error': 'Only CSV export is currently supported'}), 400
-        
-        # Get cash accounts
-        cash_accounts = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'ASSET',
-            Account.is_active == True,
-            or_(
-                Account.category == 'Cash',
-                Account.category == 'Bank',
-                Account.name.ilike('%cash%'),
-                Account.name.ilike('%bank%')
-            )
-        ).all()
-        
-        # Calculate cash flow
-        beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-        ending_cash = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-        
-        revenue_accounts = Account.query.filter_by(church_id=church_id, account_type='REVENUE', is_active=True).all()
-        expense_accounts = Account.query.filter_by(church_id=church_id, account_type='EXPENSE', is_active=True).all()
-        
-        net_income = sum(get_account_balance(acc.id, start_date, end_date) for acc in revenue_accounts) - \
-                     sum(get_account_balance(acc.id, start_date, end_date) for acc in expense_accounts)
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Header
-        writer.writerow(['CASH FLOW STATEMENT'])
-        writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-        writer.writerow([])
-        
-        # Operating Activities
-        writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        writer.writerow(['Net Income', f"{net_income:,.2f}"])
-        writer.writerow(['Net Cash from Operating Activities', f"{net_income:,.2f}"])
-        writer.writerow([])
-        
-        # Investing Activities
-        writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        writer.writerow(['No investing activities', '0.00'])
-        writer.writerow(['Net Cash from Investing Activities', '0.00'])
-        writer.writerow([])
-        
-        # Financing Activities
-        writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
-        writer.writerow(['Description', 'Amount (GHS)'])
-        writer.writerow(['No financing activities', '0.00'])
-        writer.writerow(['Net Cash from Financing Activities', '0.00'])
-        writer.writerow([])
-        
-        # Summary
-        net_increase = ending_cash - beginning_cash
-        writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{net_increase:,.2f}"])
-        writer.writerow(['Cash at Beginning of Period', f"{beginning_cash:,.2f}"])
-        writer.writerow(['Cash at End of Period', f"{ending_cash:,.2f}"])
-        
-        output.seek(0)
-        response = make_response(output.getvalue())
-        response.headers['Content-Type'] = 'text/csv'
-        response.headers['Content-Disposition'] = f'attachment; filename=cash_flow_{start_date_str}_to_{end_date_str}.csv'
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error exporting cash flow: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-def export_receipt_payment_data(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export receipt and payment account as CSV"""
-    # Get cash accounts
-    cash_accounts = Account.query.filter(
-        Account.church_id == church_id,
-        Account.account_type == 'ASSET',
-        Account.is_active == True,
-        or_(
-            Account.category == 'Cash',
-            Account.category == 'Bank',
-            Account.name.ilike('%cash%'),
-            Account.name.ilike('%bank%')
-        )
-    ).all()
-    
-    # Get revenue accounts for receipts
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    # Get expense accounts for payments
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    # Calculate receipts
-    receipts = []
-    total_receipts = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance > 0:
-            receipts.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_receipts += balance
-    
-    # Calculate payments
-    payments = []
-    total_payments = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance > 0:
-            payments.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_payments += balance
-    
-    # Calculate opening and closing balances
-    opening_balance = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-    closing_balance = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-    
-    # Write CSV
-    writer.writerow(['RECEIPT AND PAYMENT ACCOUNT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['OPENING BALANCE'])
-    writer.writerow(['Account', 'Amount (GHS)'])
-    for acc in cash_accounts:
-        balance = get_account_balance(acc.id, None, start_date - timedelta(days=1))
-        writer.writerow([acc.name, f"{balance:,.2f}"])
-    writer.writerow(['TOTAL OPENING BALANCE', f"{opening_balance:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['RECEIPTS'])
-    writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-    for item in receipts:
-        writer.writerow([
-            item['account_code'],
-            item['name'],
-            item.get('category', 'Receipts'),
-            f"{item['amount']:,.2f}"
-        ])
-    writer.writerow(['TOTAL RECEIPTS', '', '', f"{total_receipts:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['PAYMENTS'])
-    writer.writerow(['Account Code', 'Account Name', 'Category', 'Amount (GHS)'])
-    for item in payments:
-        writer.writerow([
-            item['account_code'],
-            item['name'],
-            item.get('category', 'Payments'),
-            f"{item['amount']:,.2f}"
-        ])
-    writer.writerow(['TOTAL PAYMENTS', '', '', f"{total_payments:,.2f}"])
-    writer.writerow([])
-    
-    net_cash_flow = total_receipts - total_payments
-    writer.writerow(['NET CASH FLOW', '', '', f"{net_cash_flow:,.2f}"])
-    writer.writerow(['CLOSING BALANCE', '', '', f"{closing_balance:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=receipt_payment_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-def export_income_statement_data(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export income statement as CSV"""
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    revenue_data = []
-    total_revenue = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            revenue_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_revenue += balance
-    
-    expense_data = []
-    total_expense = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            expense_data.append({
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_expense += balance
-    
-    writer.writerow(['INCOME STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['INCOME'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in revenue_data:
-        writer.writerow([
-            item.get('category', 'Revenue'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL INCOME', '', '', f"{total_revenue:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EXPENSES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in expense_data:
-        writer.writerow([
-            item.get('category', 'Expense'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EXPENSES', '', '', f"{total_expense:,.2f}"])
-    writer.writerow([])
-    
-    net_income = total_revenue - total_expense
-    writer.writerow(['NET INCOME', '', '', f"{net_income:,.2f}"])
-    writer.writerow(['STATUS', '', '', 'SURPLUS' if net_income >= 0 else 'DEFICIT'])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=income_statement_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
-
-
-def export_balance_sheet_data(church_id, end_date, end_date_str, writer, output):
-    """Export balance sheet as CSV"""
-    asset_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='ASSET', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    liability_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='LIABILITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    equity_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EQUITY', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    assets_data = []
-    total_assets = 0
-    for acc in asset_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        assets_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_assets += balance
-    
-    liabilities_data = []
-    total_liabilities = 0
-    for acc in liability_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        liabilities_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_liabilities += balance
-    
-    equity_data = []
-    total_equity = 0
-    for acc in equity_accounts:
-        balance = get_account_balance(acc.id, None, end_date)
-        equity_data.append({
-            'account_code': acc.account_code,
-            'name': acc.name,
-            'category': acc.category,
-            'amount': balance
-        })
-        total_equity += balance
-    
-    writer.writerow(['BALANCE SHEET'])
-    writer.writerow([f'As at: {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['ASSETS'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in assets_data:
-        writer.writerow([
-            item.get('category', 'Assets'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL ASSETS', '', '', f"{total_assets:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['LIABILITIES'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in liabilities_data:
-        writer.writerow([
-            item.get('category', 'Liabilities'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL LIABILITIES', '', '', f"{total_liabilities:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['EQUITY'])
-    writer.writerow(['Category', 'Account Code', 'Account Name', 'Amount (GHS)'])
-    
-    for item in equity_data:
-        writer.writerow([
-            item.get('category', 'Equity'),
-            item.get('account_code', ''),
-            item.get('name', ''),
-            f"{item.get('amount', 0):,.2f}"
-        ])
-    
-    writer.writerow(['TOTAL EQUITY', '', '', f"{total_equity:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['TOTAL LIABILITIES & EQUITY', '', '', f"{total_liabilities + total_equity:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=balance_sheet_{end_date_str}.csv'
-    
-    return response
-
-
-def export_cashflow_data(church_id, start_date, end_date, start_date_str, end_date_str, writer, output):
-    """Export cash flow statement as CSV"""
-    cash_accounts = Account.query.filter(
-        Account.church_id == church_id,
-        Account.account_type == 'ASSET',
-        Account.is_active == True,
-        or_(
-            Account.category == 'Cash',
-            Account.category == 'Bank',
-            Account.name.ilike('%cash%'),
-            Account.name.ilike('%bank%')
-        )
-    ).all()
-    
-    beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
-    ending_cash = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
-    
-    revenue_accounts = Account.query.filter_by(church_id=church_id, account_type='REVENUE', is_active=True).all()
-    expense_accounts = Account.query.filter_by(church_id=church_id, account_type='EXPENSE', is_active=True).all()
-    
-    net_income = sum(get_account_balance(acc.id, start_date, end_date) for acc in revenue_accounts) - \
-                 sum(get_account_balance(acc.id, start_date, end_date) for acc in expense_accounts)
-    
-    writer.writerow(['CASH FLOW STATEMENT'])
-    writer.writerow([f'Period: {start_date_str} to {end_date_str}'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM OPERATING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['Net Income', f"{net_income:,.2f}"])
-    writer.writerow(['Net Cash from Operating Activities', f"{net_income:,.2f}"])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM INVESTING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No investing activities', '0.00'])
-    writer.writerow(['Net Cash from Investing Activities', '0.00'])
-    writer.writerow([])
-    
-    writer.writerow(['CASH FLOW FROM FINANCING ACTIVITIES'])
-    writer.writerow(['Description', 'Amount (GHS)'])
-    writer.writerow(['No financing activities', '0.00'])
-    writer.writerow(['Net Cash from Financing Activities', '0.00'])
-    writer.writerow([])
-    
-    net_increase = ending_cash - beginning_cash
-    writer.writerow(['NET INCREASE/(DECREASE) IN CASH', f"{net_increase:,.2f}"])
-    writer.writerow(['Cash at Beginning of Period', f"{beginning_cash:,.2f}"])
-    writer.writerow(['Cash at End of Period', f"{ending_cash:,.2f}"])
-    
-    output.seek(0)
-    response = make_response(output.getvalue())
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=cash_flow_{start_date_str}_to_{end_date_str}.csv'
-    
-    return response
 
 
 # ==================== TRIAL BALANCE ====================
@@ -2160,7 +787,40 @@ def get_general_ledger():
         return jsonify({'error': str(e)}), 500
 
 
-# ==================== ACCOUNT DETAILS ====================
+# ==================== ACCOUNTS ====================
+
+@accounting_bp.route('/accounts', methods=['GET'])
+@token_required
+def get_accounts():
+    """Get all accounts for the church"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        per_page = request.args.get('perPage', 100, type=int)
+        page = request.args.get('page', 1, type=int)
+        
+        query = Account.query.filter_by(church_id=church_id, is_active=True)
+        
+        accounts = query.order_by(Account.account_type, Account.account_code).all()
+        
+        result = []
+        for acc in accounts:
+            result.append({
+                'id': acc.id,
+                'account_code': acc.account_code,
+                'name': acc.name,
+                'account_type': acc.account_type,
+                'category': acc.category,
+                'normal_balance': acc.normal_balance,
+                'current_balance': float(acc.current_balance) if acc.current_balance else 0,
+                'is_active': acc.is_active
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting accounts: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 
 @accounting_bp.route('/accounts/<int:account_id>/balance', methods=['GET'])
 @token_required
@@ -2248,266 +908,6 @@ def get_account_balance_detail(account_id):
         return jsonify({'error': str(e)}), 500
 
 
-# ==================== BANK ACCOUNTS ====================
-
-@accounting_bp.route('/bank-accounts', methods=['GET'])
-@token_required
-def get_bank_accounts():
-    """Get bank accounts for reconciliation"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        
-        bank_accounts = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'ASSET',
-            Account.is_active == True,
-            or_(
-                Account.category == 'Bank',
-                Account.name.ilike('%bank%'),
-                Account.name.ilike('%checking%'),
-                Account.name.ilike('%savings%'),
-                Account.account_code.like('1020%')
-            )
-        ).order_by(Account.name).all()
-        
-        account_list = []
-        for acc in bank_accounts:
-            account_list.append({
-                'id': acc.id,
-                'name': acc.name,
-                'accountNumber': acc.account_code,
-                'bank': acc.category or 'Bank Account',
-                'balance': float(acc.current_balance) if acc.current_balance else 0,
-                'currency': 'GHS',
-                'type': 'bank'
-            })
-        
-        return jsonify({'accounts': account_list}), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting bank accounts: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/petty-cash-accounts', methods=['GET'])
-@token_required
-def get_petty_cash_accounts():
-    """Get petty cash accounts for reconciliation"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        
-        petty_cash_accounts = Account.query.filter(
-            Account.church_id == church_id,
-            Account.account_type == 'ASSET',
-            Account.is_active == True,
-            or_(
-                Account.category == 'Cash',
-                Account.name.ilike('%petty%'),
-                Account.name.ilike('%cash%'),
-                Account.account_code.like('1010%')
-            )
-        ).order_by(Account.name).all()
-        
-        account_list = []
-        for acc in petty_cash_accounts:
-            account_list.append({
-                'id': acc.id,
-                'name': acc.name,
-                'accountNumber': acc.account_code,
-                'balance': float(acc.current_balance) if acc.current_balance else 0,
-                'currency': 'GHS',
-                'type': 'petty_cash'
-            })
-        
-        return jsonify({'accounts': account_list}), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting petty cash accounts: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-# ==================== RECONCILIATION ====================
-
-@accounting_bp.route('/reconciliation', methods=['GET'])
-@token_required
-def get_reconciliation_data():
-    """Get reconciliation data for an account"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        account_id = request.args.get('accountId', type=int)
-        as_of = request.args.get('asOf')
-        
-        if not account_id:
-            return jsonify({'error': 'Account ID is required'}), 400
-        
-        if as_of:
-            try:
-                as_of_date = datetime.fromisoformat(as_of.replace('Z', '+00:00'))
-            except:
-                as_of_date = datetime.utcnow()
-        else:
-            as_of_date = datetime.utcnow()
-        
-        account = Account.query.filter_by(id=account_id, church_id=church_id).first()
-        if not account:
-            return jsonify({'error': 'Account not found'}), 404
-        
-        transactions = db.session.query(
-            JournalLine, JournalEntry
-        ).join(
-            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-        ).filter(
-            JournalLine.account_id == account_id,
-            JournalEntry.church_id == church_id,
-            JournalEntry.status == 'POSTED',
-            JournalEntry.entry_date <= as_of_date
-        ).order_by(JournalEntry.entry_date).all()
-        
-        unreconciled_items = []
-        for line, entry in transactions:
-            unreconciled_items.append({
-                'id': line.id,
-                'date': entry.entry_date.isoformat(),
-                'description': entry.description,
-                'reference': entry.entry_number,
-                'amount': float(line.debit or line.credit),
-                'type': 'debit' if line.debit > 0 else 'credit',
-                'status': entry.status
-            })
-        
-        return jsonify({
-            'account': {
-                'id': account.id,
-                'name': account.name,
-                'type': account.account_type,
-                'code': account.account_code,
-                'current_balance': float(account.current_balance)
-            },
-            'statement_balance': float(account.current_balance),
-            'unreconciled_items': unreconciled_items,
-            'as_of': as_of_date.isoformat(),
-            'transactions': unreconciled_items
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting reconciliation data: {str(e)}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/reconciliation/<int:transaction_id>/reconcile', methods=['POST'])
-@token_required
-def reconcile_transaction(transaction_id):
-    """Mark a transaction as reconciled"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        data = request.get_json() or {}
-        reconciliation_date = data.get('reconciliationDate', datetime.utcnow().isoformat())
-        
-        line = JournalLine.query.get(transaction_id)
-        if not line:
-            return jsonify({'error': 'Transaction not found'}), 404
-        
-        entry = JournalEntry.query.get(line.journal_entry_id)
-        if not entry or entry.church_id != church_id:
-            return jsonify({'error': 'Access denied'}), 403
-        
-        print(f"Transaction {transaction_id} reconciled on {reconciliation_date}")
-        
-        return jsonify({
-            'message': 'Transaction reconciled successfully',
-            'transaction_id': transaction_id
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error reconciling transaction: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/reconciliation/<int:transaction_id>/unreconcile', methods=['POST'])
-@token_required
-def unreconcile_transaction(transaction_id):
-    """Unreconcile a transaction"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        
-        line = JournalLine.query.get(transaction_id)
-        if not line:
-            return jsonify({'error': 'Transaction not found'}), 404
-        
-        entry = JournalEntry.query.get(line.journal_entry_id)
-        if not entry or entry.church_id != church_id:
-            return jsonify({'error': 'Access denied'}), 403
-        
-        print(f"Transaction {transaction_id} unreconciled")
-        
-        return jsonify({
-            'message': 'Transaction unreconciled successfully',
-            'transaction_id': transaction_id
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error unreconciling transaction: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/reconciliation/history', methods=['GET'])
-@token_required
-def get_reconciliation_history():
-    """Get reconciliation history for an account"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        account_id = request.args.get('accountId', type=int)
-        
-        if not account_id:
-            return jsonify({'error': 'Account ID is required'}), 400
-        
-        return jsonify({'history': []}), 200
-        
-    except Exception as e:
-        logger.error(f"Error getting reconciliation history: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
-@accounting_bp.route('/reconciliation/complete', methods=['POST'])
-@token_required
-def complete_reconciliation():
-    """Complete a reconciliation"""
-    try:
-        church_id = ensure_user_church(g.current_user)
-        data = request.get_json()
-        
-        account_id = data.get('accountId')
-        reconciliation_date = data.get('reconciliationDate')
-        reconciled_items = data.get('reconciledItems', [])
-        adjustments = data.get('adjustments', [])
-        statement_balance = data.get('statementBalance', 0)
-        closing_balance = data.get('closingBalance', 0)
-        
-        if not account_id or not reconciliation_date:
-            return jsonify({'error': 'Account ID and reconciliation date are required'}), 400
-        
-        print(f"Reconciliation completed for account {account_id} on {reconciliation_date}")
-        print(f"Reconciled items: {len(reconciled_items)}")
-        print(f"Adjustments: {len(adjustments)}")
-        print(f"Statement balance: {statement_balance}")
-        print(f"Closing balance: {closing_balance}")
-        
-        return jsonify({
-            'message': 'Reconciliation completed successfully',
-            'reconciled_items': len(reconciled_items)
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error completing reconciliation: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-
 # ==================== TAX REPORTS ====================
 
 @accounting_bp.route('/tax-reports', methods=['GET'])
@@ -2535,7 +935,7 @@ def get_tax_reports():
         end_date = datetime(year, 12, 31, 23, 59, 59)
         
         if report_type == 'summary':
-            total_income_result = db.session.query(
+            total_income = db.session.query(
                 func.sum(JournalLine.credit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2549,9 +949,7 @@ def get_tax_reports():
                 Account.account_type == 'REVENUE'
             ).scalar() or 0
             
-            total_income = float(total_income_result) if total_income_result else 0.0
-            
-            total_expenses_result = db.session.query(
+            total_expenses = db.session.query(
                 func.sum(JournalLine.debit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2565,9 +963,7 @@ def get_tax_reports():
                 Account.account_type == 'EXPENSE'
             ).scalar() or 0
             
-            total_expenses = float(total_expenses_result) if total_expenses_result else 0.0
-            
-            tax_exempt_result = db.session.query(
+            tax_exempt = db.session.query(
                 func.sum(JournalLine.credit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2582,9 +978,7 @@ def get_tax_reports():
                 Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
             ).scalar() or 0
             
-            tax_exempt = float(tax_exempt_result) if tax_exempt_result else 0.0
-            
-            taxes_paid_result = db.session.query(
+            taxes_paid = db.session.query(
                 func.sum(JournalLine.debit)
             ).join(
                 JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2599,8 +993,6 @@ def get_tax_reports():
                 Account.category == 'Taxes'
             ).scalar() or 0
             
-            taxes_paid = float(taxes_paid_result) if taxes_paid_result else 0.0
-            
             taxable_income = total_income - tax_exempt
             estimated_tax = taxable_income * 0.05
             tax_due = max(0.0, estimated_tax - taxes_paid)
@@ -2613,7 +1005,7 @@ def get_tax_reports():
                 else:
                     q_end = datetime(year, 12, 31)
                 
-                q_income_result = db.session.query(
+                q_income = db.session.query(
                     func.sum(JournalLine.credit)
                 ).join(
                     JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2627,9 +1019,7 @@ def get_tax_reports():
                     Account.account_type == 'REVENUE'
                 ).scalar() or 0
                 
-                q_income = float(q_income_result) if q_income_result else 0.0
-                
-                q_tax_paid_result = db.session.query(
+                q_tax_paid = db.session.query(
                     func.sum(JournalLine.debit)
                 ).join(
                     JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
@@ -2644,118 +1034,31 @@ def get_tax_reports():
                     Account.category == 'Taxes'
                 ).scalar() or 0
                 
-                q_tax_paid = float(q_tax_paid_result) if q_tax_paid_result else 0.0
-                
                 quarters.append({
                     'quarter': f'Q{q}',
-                    'income': q_income,
-                    'estimatedTax': q_income * 0.05,
-                    'paid': q_tax_paid
+                    'income': float(q_income),
+                    'estimatedTax': float(q_income) * 0.05,
+                    'paid': float(q_tax_paid)
                 })
             
             return jsonify({
                 'summary': {
-                    'totalIncome': total_income,
-                    'taxableIncome': taxable_income,
-                    'taxExemptIncome': tax_exempt,
-                    'estimatedTax': estimated_tax,
-                    'paidTaxes': taxes_paid,
-                    'taxDue': tax_due,
+                    'totalIncome': float(total_income),
+                    'taxableIncome': float(taxable_income),
+                    'taxExemptIncome': float(tax_exempt),
+                    'estimatedTax': float(estimated_tax),
+                    'paidTaxes': float(taxes_paid),
+                    'taxDue': float(tax_due),
                     'quarters': quarters
                 }
             }), 200
         
         elif report_type == 'withholding':
-            salaries = db.session.query(
-                Account.name,
-                func.sum(JournalLine.debit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE',
-                Account.category.in_(['Staff Cost', 'Salary', 'Wages'])
-            ).group_by(Account.id).all()
-            
-            withholdings = []
-            for salary in salaries:
-                total = float(salary.total) if salary.total else 0.0
-                withholdings.append({
-                    'employee': salary.name,
-                    'position': 'Employee',
-                    'wages': total,
-                    'federalWithheld': total * 0.15,
-                    'stateWithheld': total * 0.05,
-                    'ficaWithheld': total * 0.0765
-                })
-            
-            return jsonify({'withholdings': withholdings}), 200
-            
+            return jsonify({'withholdings': []}), 200
         elif report_type == 'donor':
-            donor_contributions = db.session.query(
-                Account.name,
-                func.sum(JournalLine.credit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'REVENUE',
-                Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
-            ).group_by(Account.id).all()
-            
-            donors = []
-            for contribution in donor_contributions:
-                total = float(contribution.total) if contribution.total else 0.0
-                donors.append({
-                    'id': len(donors) + 1,
-                    'name': contribution.name,
-                    'totalGifts': total,
-                    'cash': total,
-                    'nonCash': 0,
-                    'statements': 1
-                })
-            
-            return jsonify({'donors': donors}), 200
-            
+            return jsonify({'donors': []}), 200
         elif report_type == '1099':
-            contractors = db.session.query(
-                Account.name,
-                func.sum(JournalLine.debit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE',
-                Account.category == 'Contractor'
-            ).group_by(Account.id).having(func.sum(JournalLine.debit) >= 600).all()
-            
-            contractor_list = []
-            for contractor in contractors:
-                total = float(contractor.total) if contractor.total else 0.0
-                contractor_list.append({
-                    'name': contractor.name,
-                    'ein': 'XXX-XX-XXXX',
-                    'amount': total,
-                    'reportable': total >= 600
-                })
-            
-            return jsonify({'contractors': contractor_list}), 200
-        
+            return jsonify({'contractors': []}), 200
         else:
             return jsonify({'error': f'Invalid report type: {report_type}'}), 400
             
@@ -2772,12 +1075,10 @@ def export_tax_report():
     try:
         church_id = ensure_user_church(g.current_user)
         
-        # Parse year from request
         year = request.args.get('year')
         if not year:
             year = datetime.utcnow().year
         
-        # Handle nested param format like year[year]=2026
         if isinstance(year, dict):
             year = year.get('year', datetime.utcnow().year)
         
@@ -2789,8 +1090,8 @@ def export_tax_report():
         report_type = request.args.get('type', 'summary')
         format_type = request.args.get('format', 'csv')
         
-        start_date = datetime(year, 1, 1)
-        end_date = datetime(year, 12, 31, 23, 59, 59)
+        if format_type != 'csv':
+            return jsonify({'error': 'Only CSV export is currently supported'}), 400
         
         import csv
         import io
@@ -2798,253 +1099,90 @@ def export_tax_report():
         output = io.StringIO()
         writer = csv.writer(output)
         
-        if report_type == 'summary':
-            # Get total income for the year - convert to float
-            total_income_result = db.session.query(
-                func.sum(JournalLine.credit)
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).join(
-                Account, Account.id == JournalLine.account_id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'REVENUE'
-            ).scalar() or 0
-            
-            total_income = float(total_income_result) if total_income_result else 0.0
-            
-            # Get total expenses for the year
-            total_expenses_result = db.session.query(
-                func.sum(JournalLine.debit)
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).join(
-                Account, Account.id == JournalLine.account_id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE'
-            ).scalar() or 0
-            
-            total_expenses = float(total_expenses_result) if total_expenses_result else 0.0
-            
-            # Get tax-exempt income
-            tax_exempt_result = db.session.query(
-                func.sum(JournalLine.credit)
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).join(
-                Account, Account.id == JournalLine.account_id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'REVENUE',
-                Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
-            ).scalar() or 0
-            
-            tax_exempt = float(tax_exempt_result) if tax_exempt_result else 0.0
-            
-            # Get taxes paid
-            taxes_paid_result = db.session.query(
-                func.sum(JournalLine.debit)
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).join(
-                Account, Account.id == JournalLine.account_id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE',
-                Account.category == 'Taxes'
-            ).scalar() or 0
-            
-            taxes_paid = float(taxes_paid_result) if taxes_paid_result else 0.0
-            
-            taxable_income = total_income - tax_exempt
-            estimated_tax = taxable_income * 0.05
-            tax_due = max(0.0, estimated_tax - taxes_paid)
-            
-            # Write CSV
-            writer.writerow(['Tax Summary Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['INCOME STATEMENT SUMMARY'])
-            writer.writerow(['Description', 'Amount (GHS)'])
-            writer.writerow(['Total Revenue', f'{total_income:,.2f}'])
-            writer.writerow(['Total Expenses', f'{total_expenses:,.2f}'])
-            writer.writerow(['Net Income', f'{total_income - total_expenses:,.2f}'])
-            writer.writerow([])
-            writer.writerow(['TAX CALCULATION'])
-            writer.writerow(['Description', 'Amount (GHS)'])
-            writer.writerow(['Total Income', f'{total_income:,.2f}'])
-            writer.writerow(['Tax-Exempt Income', f'{tax_exempt:,.2f}'])
-            writer.writerow(['Taxable Income', f'{taxable_income:,.2f}'])
-            writer.writerow(['Estimated Tax (5%)', f'{estimated_tax:,.2f}'])
-            writer.writerow(['Taxes Paid', f'{taxes_paid:,.2f}'])
-            writer.writerow(['Tax Due', f'{tax_due:,.2f}'])
-            writer.writerow([])
-            writer.writerow(['QUARTERLY BREAKDOWN'])
-            writer.writerow(['Quarter', 'Income (GHS)', 'Estimated Tax (GHS)', 'Tax Paid (GHS)'])
-            
-            for q in range(1, 5):
-                q_start = datetime(year, (q-1)*3 + 1, 1)
-                if q < 4:
-                    q_end = datetime(year, q*3, 1).replace(day=1) - timedelta(days=1)
-                else:
-                    q_end = datetime(year, 12, 31)
-                
-                q_income_result = db.session.query(
-                    func.sum(JournalLine.credit)
-                ).join(
-                    JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-                ).join(
-                    Account, Account.id == JournalLine.account_id
-                ).filter(
-                    JournalEntry.church_id == church_id,
-                    JournalEntry.entry_date >= q_start,
-                    JournalEntry.entry_date <= q_end,
-                    JournalEntry.status == 'POSTED',
-                    Account.account_type == 'REVENUE'
-                ).scalar() or 0
-                
-                q_income = float(q_income_result) if q_income_result else 0.0
-                
-                q_tax_paid_result = db.session.query(
-                    func.sum(JournalLine.debit)
-                ).join(
-                    JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-                ).join(
-                    Account, Account.id == JournalLine.account_id
-                ).filter(
-                    JournalEntry.church_id == church_id,
-                    JournalEntry.entry_date >= q_start,
-                    JournalEntry.entry_date <= q_end,
-                    JournalEntry.status == 'POSTED',
-                    Account.account_type == 'EXPENSE',
-                    Account.category == 'Taxes'
-                ).scalar() or 0
-                
-                q_tax_paid = float(q_tax_paid_result) if q_tax_paid_result else 0.0
-                
-                writer.writerow([
-                    f'Q{q}',
-                    f'{q_income:,.2f}',
-                    f'{q_income * 0.05:,.2f}',
-                    f'{q_tax_paid:,.2f}'
-                ])
+        start_date = datetime(year, 1, 1)
+        end_date = datetime(year, 12, 31, 23, 59, 59)
         
-        elif report_type == 'withholding':
-            writer.writerow(['Withholding Tax Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Employee', 'Position', 'Wages (GHS)', 'Federal Withheld (GHS)', 'State Withheld (GHS)', 'FICA Withheld (GHS)'])
-            
-            salaries = db.session.query(
-                Account.name,
-                func.sum(JournalLine.debit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE',
-                Account.category.in_(['Staff Cost', 'Salary', 'Wages'])
-            ).group_by(Account.id).all()
-            
-            for salary in salaries:
-                total = float(salary.total) if salary.total else 0.0
-                writer.writerow([
-                    salary.name,
-                    'Employee',
-                    f'{total:,.2f}',
-                    f'{total * 0.15:,.2f}',
-                    f'{total * 0.05:,.2f}',
-                    f'{total * 0.0765:,.2f}'
-                ])
+        total_income = db.session.query(
+            func.sum(JournalLine.credit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'REVENUE'
+        ).scalar() or 0
         
-        elif report_type == 'donor':
-            writer.writerow(['Donor Contribution Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Donor Name', 'Total Gifts (GHS)', 'Cash (GHS)', 'Non-Cash (GHS)', 'Statements'])
-            
-            donor_contributions = db.session.query(
-                Account.name,
-                func.sum(JournalLine.credit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'REVENUE',
-                Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
-            ).group_by(Account.id).all()
-            
-            for contribution in donor_contributions:
-                total = float(contribution.total) if contribution.total else 0.0
-                writer.writerow([
-                    contribution.name,
-                    f'{total:,.2f}',
-                    f'{total:,.2f}',
-                    '0.00',
-                    '1'
-                ])
+        total_expenses = db.session.query(
+            func.sum(JournalLine.debit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'EXPENSE'
+        ).scalar() or 0
         
-        elif report_type == '1099':
-            writer.writerow(['1099 Contractor Report'])
-            writer.writerow([f'Year: {year}'])
-            writer.writerow([f'Generated: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")}'])
-            writer.writerow([])
-            writer.writerow(['Contractor Name', 'EIN', 'Amount (GHS)', 'Reportable'])
-            
-            contractors = db.session.query(
-                Account.name,
-                func.sum(JournalLine.debit).label('total')
-            ).join(
-                JournalLine, JournalLine.account_id == Account.id
-            ).join(
-                JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-            ).filter(
-                JournalEntry.church_id == church_id,
-                JournalEntry.entry_date >= start_date,
-                JournalEntry.entry_date <= end_date,
-                JournalEntry.status == 'POSTED',
-                Account.account_type == 'EXPENSE',
-                Account.category == 'Contractor'
-            ).group_by(Account.id).having(func.sum(JournalLine.debit) >= 600).all()
-            
-            for contractor in contractors:
-                total = float(contractor.total) if contractor.total else 0.0
-                writer.writerow([
-                    contractor.name,
-                    'XXX-XX-XXXX',
-                    f'{total:,.2f}',
-                    'Yes' if total >= 600 else 'No'
-                ])
+        tax_exempt = db.session.query(
+            func.sum(JournalLine.credit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'REVENUE',
+            Account.category.in_(['Tithes', 'Thanks Offering', 'Donations Received'])
+        ).scalar() or 0
+        
+        taxes_paid = db.session.query(
+            func.sum(JournalLine.debit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_date,
+            JournalEntry.entry_date <= end_date,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'EXPENSE',
+            Account.category == 'Taxes'
+        ).scalar() or 0
+        
+        taxable_income = float(total_income) - float(tax_exempt)
+        estimated_tax = taxable_income * 0.05
+        tax_due = max(0.0, estimated_tax - float(taxes_paid))
+        
+        writer.writerow(['Tax Summary Report'])
+        writer.writerow([f'Year: {year}'])
+        writer.writerow([])
+        writer.writerow(['INCOME STATEMENT SUMMARY'])
+        writer.writerow(['Description', 'Amount (GHS)'])
+        writer.writerow(['Total Revenue', f"{float(total_income):,.2f}"])
+        writer.writerow(['Total Expenses', f"{float(total_expenses):,.2f}"])
+        writer.writerow(['Net Income', f"{float(total_income) - float(total_expenses):,.2f}"])
+        writer.writerow([])
+        writer.writerow(['TAX CALCULATION'])
+        writer.writerow(['Description', 'Amount (GHS)'])
+        writer.writerow(['Total Income', f"{float(total_income):,.2f}"])
+        writer.writerow(['Tax-Exempt Income', f"{float(tax_exempt):,.2f}"])
+        writer.writerow(['Taxable Income', f"{taxable_income:,.2f}"])
+        writer.writerow(['Estimated Tax (5%)', f"{estimated_tax:,.2f}"])
+        writer.writerow(['Taxes Paid', f"{float(taxes_paid):,.2f}"])
+        writer.writerow(['Tax Due', f"{tax_due:,.2f}"])
         
         output.seek(0)
-        
-        # Create response with CSV content
         response = make_response(output.getvalue())
         response.headers['Content-Type'] = 'text/csv'
         response.headers['Content-Disposition'] = f'attachment; filename=tax_report_{report_type}_{year}.csv'
@@ -3055,291 +1193,870 @@ def export_tax_report():
         logger.error(f"Error exporting tax report: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    
-# ==================== FINANCIAL STATEMENTS WITH BUDGET ====================
 
-@accounting_bp.route('/financial-statements-with-budget', methods=['GET'])
+
+# ==================== LEAVE ROUTES ====================
+
+@accounting_bp.route('/leave/balances', methods=['GET'])
 @token_required
-def get_financial_statements_with_budget():
-    """Get financial statements with budget variance analysis"""
+def get_leave_balances():
+    """Get leave balances"""
     try:
         church_id = ensure_user_church(g.current_user)
-        start_date_str = request.args.get('startDate')
-        end_date_str = request.args.get('endDate')
         
-        if not start_date_str or not end_date_str:
-            return jsonify({'error': 'startDate and endDate are required'}), 400
+        year = request.args.get('year', type=int, default=datetime.now().year)
+        employee_id = request.args.get('employee_id', type=int)
+        leave_type = request.args.get('leave_type')
         
-        try:
-            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
-            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
-        except:
-            return jsonify({'error': 'Invalid date format'}), 400
+        query = LeaveBalance.query.join(Employee).filter(
+            Employee.church_id == church_id,
+            LeaveBalance.year == year
+        )
         
-        year = start_date.year
+        if employee_id:
+            query = query.filter(LeaveBalance.employee_id == employee_id)
         
-        income_data = _get_income_statement_data(church_id, start_date, end_date)
-        budget_data = _get_budget_data(church_id, year, start_date, end_date)
+        if leave_type:
+            leave_type_obj = LeaveType.query.filter_by(code=leave_type).first()
+            if leave_type_obj:
+                query = query.filter(LeaveBalance.leave_type_id == leave_type_obj.id)
         
-        revenue_variance = income_data['revenue']['total'] - budget_data['revenue_budget']
-        expense_variance = income_data['expenses']['total'] - budget_data['expense_budget']
-        net_variance = income_data['net_income'] - (budget_data['revenue_budget'] - budget_data['expense_budget'])
+        balances = query.all()
         
-        return jsonify({
-            'income_statement': income_data,
-            'budget_comparison': {
-                'revenue': {
-                    'budget': round(budget_data['revenue_budget'], 2),
-                    'actual': round(income_data['revenue']['total'], 2),
-                    'variance': round(revenue_variance, 2),
-                    'variance_percentage': round((revenue_variance / budget_data['revenue_budget'] * 100) if budget_data['revenue_budget'] > 0 else 0, 2),
-                    'favorable': revenue_variance > 0
-                },
-                'expenses': {
-                    'budget': round(budget_data['expense_budget'], 2),
-                    'actual': round(income_data['expenses']['total'], 2),
-                    'variance': round(expense_variance, 2),
-                    'variance_percentage': round((expense_variance / budget_data['expense_budget'] * 100) if budget_data['expense_budget'] > 0 else 0, 2),
-                    'favorable': expense_variance < 0
-                },
-                'net': {
-                    'budget': round(budget_data['revenue_budget'] - budget_data['expense_budget'], 2),
-                    'actual': round(income_data['net_income'], 2),
-                    'variance': round(net_variance, 2),
-                    'favorable': net_variance > 0
-                }
-            },
-            'period': {
-                'start': start_date.isoformat(),
-                'end': end_date.isoformat(),
-                'year': year
+        result = []
+        for balance in balances:
+            # Safely get employee name
+            employee_name = None
+            if balance.employee:
+                try:
+                    # Try to get full name safely
+                    if hasattr(balance.employee, 'full_name'):
+                        if callable(balance.employee.full_name):
+                            employee_name = balance.employee.full_name()
+                        else:
+                            employee_name = balance.employee.full_name
+                    else:
+                        # Fallback to first_name + last_name
+                        first = getattr(balance.employee, 'first_name', '')
+                        last = getattr(balance.employee, 'last_name', '')
+                        employee_name = f"{first} {last}".strip() or f"Employee {balance.employee.id}"
+                except Exception as e:
+                    logger.warning(f"Error getting employee name: {e}")
+                    employee_name = f"Employee {balance.employee.id}"
+            
+            # Get leave type name safely
+            leave_type_name = None
+            if balance.leave_type:
+                leave_type_name = balance.leave_type.code if hasattr(balance.leave_type, 'code') else str(balance.leave_type)
+            
+            balance_dict = {
+                'id': balance.id,
+                'employee_id': balance.employee_id,
+                'employee_name': employee_name,
+                'leave_type': leave_type_name,
+                'year': balance.year,
+                'annual_entitlement': balance.total_days,
+                'used': balance.used_days,
+                'remaining': balance.remaining_days
             }
-        }), 200
+            result.append(balance_dict)
+        
+        return jsonify({'balances': result}), 200
         
     except Exception as e:
-        logger.error(f"Error getting financial statements with budget: {str(e)}")
+        logger.error(f"Error fetching leave balances: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@accounting_bp.route('/leave/requests', methods=['GET'])
+@token_required
+def get_leave_requests():
+    """Get leave requests"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        status = request.args.get('status')
+        stage = request.args.get('stage')
+        employee_id = request.args.get('employee_id', type=int)
+        
+        query = LeaveRequest.query.join(Employee).filter(
+            Employee.church_id == church_id
+        )
+        
+        if stage == 'pending_pastor':
+            query = query.filter(LeaveRequest.status == 'PENDING_PASTOR')
+        elif stage == 'pending_allowance':
+            query = query.filter(
+                LeaveRequest.status == 'APPROVED',
+                LeaveRequest.allowance_processed == False
+            )
+        elif stage == 'pending_treasurer':
+            query = query.filter(
+                LeaveRequest.allowance_processed == True,
+                LeaveRequest.allowance_approved == False
+            )
+        elif stage == 'pending_payment':
+            query = query.filter(
+                LeaveRequest.allowance_approved == True,
+                LeaveRequest.posted_to_ledger == False
+            )
+        elif status and status != 'all':
+            query = query.filter(LeaveRequest.status == status.upper())
+        
+        if employee_id:
+            query = query.filter(LeaveRequest.employee_id == employee_id)
+        
+        requests = query.order_by(LeaveRequest.created_at.desc()).all()
+        
+        result = []
+        for req in requests:
+            # Safely get employee name
+            employee_name = None
+            employee_data = None
+            if req.employee:
+                try:
+                    # Try to get full name safely
+                    if hasattr(req.employee, 'full_name'):
+                        if callable(req.employee.full_name):
+                            employee_name = req.employee.full_name()
+                        else:
+                            employee_name = req.employee.full_name
+                    else:
+                        # Fallback to first_name + last_name
+                        first = getattr(req.employee, 'first_name', '')
+                        last = getattr(req.employee, 'last_name', '')
+                        employee_name = f"{first} {last}".strip() or f"Employee {req.employee.id}"
+                    
+                    employee_data = {
+                        'id': req.employee.id,
+                        'name': employee_name,
+                        'position': getattr(req.employee, 'position', None),
+                        'department': getattr(req.employee, 'department', None)
+                    }
+                except Exception as e:
+                    logger.warning(f"Error getting employee name: {e}")
+                    employee_name = f"Employee {req.employee.id}"
+                    employee_data = {
+                        'id': req.employee.id,
+                        'name': employee_name,
+                        'position': None,
+                        'department': None
+                    }
+            
+            # Safely get leave type
+            leave_type_name = None
+            if req.leave_type:
+                leave_type_name = req.leave_type.code if hasattr(req.leave_type, 'code') else str(req.leave_type)
+            
+            req_dict = {
+                'id': req.id,
+                'employee_id': req.employee_id,
+                'employee': employee_data,
+                'employee_name': employee_name,
+                'leave_type': leave_type_name,
+                'start_date': req.start_date.isoformat() if req.start_date else None,
+                'end_date': req.end_date.isoformat() if req.end_date else None,
+                'days_requested': req.days_requested,
+                'reason': req.reason,
+                'status': req.status,
+                'allowance_processed': req.allowance_processed,
+                'allowance_amount': float(req.allowance_amount) if req.allowance_amount else 0,
+                'allowance_approved': req.allowance_approved,
+                'posted_to_ledger': req.posted_to_ledger,
+                'created_at': req.created_at.isoformat() if req.created_at else None,
+                'pastor_at': req.pastor_at.isoformat() if req.pastor_at else None,
+                'allowance_processed_at': req.allowance_processed_at.isoformat() if req.allowance_processed_at else None,
+                'allowance_approved_at': req.allowance_approved_at.isoformat() if req.allowance_approved_at else None,
+                'posted_at': req.posted_at.isoformat() if req.posted_at else None,
+            }
+            result.append(req_dict)
+        
+        return jsonify({'requests': result}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching leave requests: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@accounting_bp.route('/leave/requests/<int:request_id>', methods=['GET'])
+@token_required
+def get_leave_request(request_id):
+    """Get single leave request"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Safely get employee name
+        employee_name = None
+        employee_data = None
+        if leave_request.employee:
+            try:
+                if hasattr(leave_request.employee, 'full_name'):
+                    if callable(leave_request.employee.full_name):
+                        employee_name = leave_request.employee.full_name()
+                    else:
+                        employee_name = leave_request.employee.full_name
+                else:
+                    first = getattr(leave_request.employee, 'first_name', '')
+                    last = getattr(leave_request.employee, 'last_name', '')
+                    employee_name = f"{first} {last}".strip() or f"Employee {leave_request.employee.id}"
+                
+                employee_data = {
+                    'id': leave_request.employee.id,
+                    'name': employee_name,
+                    'position': getattr(leave_request.employee, 'position', None),
+                    'department': getattr(leave_request.employee, 'department', None)
+                }
+            except Exception as e:
+                logger.warning(f"Error getting employee name: {e}")
+                employee_name = f"Employee {leave_request.employee.id}"
+                employee_data = {
+                    'id': leave_request.employee.id,
+                    'name': employee_name,
+                    'position': None,
+                    'department': None
+                }
+        
+        result = {
+            'id': leave_request.id,
+            'employee_id': leave_request.employee_id,
+            'employee': employee_data,
+            'employee_name': employee_name,
+            'leave_type': leave_request.leave_type.code if leave_request.leave_type else None,
+            'start_date': leave_request.start_date.isoformat() if leave_request.start_date else None,
+            'end_date': leave_request.end_date.isoformat() if leave_request.end_date else None,
+            'days_requested': leave_request.days_requested,
+            'reason': leave_request.reason,
+            'status': leave_request.status,
+            'allowance_processed': leave_request.allowance_processed,
+            'allowance_amount': float(leave_request.allowance_amount) if leave_request.allowance_amount else 0,
+            'allowance_approved': leave_request.allowance_approved,
+            'posted_to_ledger': leave_request.posted_to_ledger,
+            'journal_entry_id': leave_request.journal_entry_id,
+            'created_at': leave_request.created_at.isoformat() if leave_request.created_at else None,
+            'admin_at': leave_request.admin_at.isoformat() if leave_request.admin_at else None,
+            'admin_comments': leave_request.admin_comments,
+            'pastor_at': leave_request.pastor_at.isoformat() if leave_request.pastor_at else None,
+            'pastor_comments': leave_request.pastor_comments,
+            'allowance_processed_at': leave_request.allowance_processed_at.isoformat() if leave_request.allowance_processed_at else None,
+            'accountant_comments': leave_request.accountant_comments,
+            'allowance_approved_at': leave_request.allowance_approved_at.isoformat() if leave_request.allowance_approved_at else None,
+            'treasurer_comments': leave_request.treasurer_comments,
+            'posted_at': leave_request.posted_at.isoformat() if leave_request.posted_at else None,
+            'rejection_reason': leave_request.rejection_reason,
+            'rejection_stage': leave_request.rejection_stage,
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching leave request: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+# Add this to your accounting_routes.py file (around the other leave endpoints)
+
+@accounting_bp.route('/leave/types', methods=['GET'])
+@token_required
+def get_leave_types():
+    """Get all leave types"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get leave types
+        leave_types = LeaveType.query.filter_by(is_active=True).order_by(LeaveType.code).all()
+        
+        result = []
+        for lt in leave_types:
+            result.append({
+                'id': lt.id,
+                'code': lt.code,
+                'name': lt.name,
+                'description': lt.description,
+                'default_days': lt.default_days,
+                'is_paid': lt.is_paid,
+                'requires_approval': lt.requires_approval,
+                'allowance_rate': float(lt.allowance_rate) if lt.allowance_rate else 0,
+                'allowance_type': lt.allowance_type,
+                'is_active': lt.is_active
+            })
+        
+        return jsonify({'leave_types': result}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching leave types: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@accounting_bp.route('/leave/balances/initialize', methods=['POST'])
+@token_required
+def initialize_leave_balances():
+    """Initialize leave balances for a year"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        data = request.get_json() or {}
+        year = data.get('year', datetime.now().year)
+        
+        # Get all active employees
+        employees = Employee.query.filter_by(
+            church_id=church_id,
+            is_active=True
+        ).all()
+        
+        # Get all leave types
+        leave_types = LeaveType.query.filter_by(is_active=True).all()
+        
+        created_count = 0
+        existing_count = 0
+        
+        for employee in employees:
+            for leave_type in leave_types:
+                # Check if balance already exists
+                existing = LeaveBalance.query.filter_by(
+                    employee_id=employee.id,
+                    leave_type_id=leave_type.id,
+                    year=year
+                ).first()
+                
+                if not existing:
+                    balance = LeaveBalance(
+                        employee_id=employee.id,
+                        leave_type_id=leave_type.id,
+                        year=year,
+                        total_days=leave_type.default_days,
+                        used_days=0,
+                        remaining_days=leave_type.default_days
+                    )
+                    db.session.add(balance)
+                    created_count += 1
+                else:
+                    existing_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': f'Leave balances initialized for year {year}',
+            'created': created_count,
+            'existing': existing_count,
+            'total': created_count + existing_count
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error initializing leave balances: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+
+@accounting_bp.route('/leave/requests', methods=['POST'])
+@token_required
+def create_leave_request():
+    """Create leave request (Admin/HR creates from printed form)"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        data = request.get_json()
+        
+        required_fields = ['employee_id', 'leave_type', 'start_date', 'end_date']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing field: {field}'}), 400
+        
+        start_date = datetime.fromisoformat(data['start_date'].replace('Z', '+00:00')).date()
+        end_date = datetime.fromisoformat(data['end_date'].replace('Z', '+00:00')).date()
+        
+        days_requested = (end_date - start_date).days + 1
+        
+        if days_requested <= 0:
+            return jsonify({'error': 'End date must be after start date'}), 400
+        
+        leave_type = LeaveType.query.filter_by(code=data['leave_type']).first()
+        if not leave_type:
+            return jsonify({'error': 'Invalid leave type'}), 400
+        
+        if leave_type.is_paid:
+            balance = LeaveBalance.query.filter_by(
+                employee_id=data['employee_id'],
+                leave_type_id=leave_type.id,
+                year=start_date.year
+            ).first()
+            
+            if not balance:
+                return jsonify({'error': 'Leave balance not found for this employee'}), 404
+            
+            if balance.remaining_days < days_requested:
+                return jsonify({
+                    'error': 'Insufficient leave balance',
+                    'available': balance.remaining_days,
+                    'requested': days_requested
+                }), 400
+        
+        leave_request = LeaveRequest(
+            employee_id=data['employee_id'],
+            leave_type_id=leave_type.id,
+            start_date=start_date,
+            end_date=end_date,
+            days_requested=days_requested,
+            reason=data.get('reason', ''),
+            status='PENDING_PASTOR',
+            admin_id=current_user.id,
+            admin_at=datetime.utcnow(),
+            admin_comments=data.get('admin_comments', '')
+        )
+        
+        db.session.add(leave_request)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Leave request created successfully and sent to Pastor for approval',
+            'request': {'id': leave_request.id}
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating leave request: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
-def _get_income_statement_data(church_id, start_date, end_date):
-    """Helper to get income statement data"""
-    revenue_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='REVENUE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    revenue_data = []
-    total_revenue = 0
-    for acc in revenue_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            revenue_data.append({
-                'id': acc.id,
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_revenue += balance
-    
-    expense_accounts = Account.query.filter_by(
-        church_id=church_id, account_type='EXPENSE', is_active=True
-    ).order_by(Account.account_code).all()
-    
-    expense_data = []
-    total_expense = 0
-    for acc in expense_accounts:
-        balance = get_account_balance(acc.id, start_date, end_date)
-        if balance != 0:
-            expense_data.append({
-                'id': acc.id,
-                'account_code': acc.account_code,
-                'name': acc.name,
-                'category': acc.category,
-                'amount': balance
-            })
-            total_expense += balance
-    
-    return {
-        'revenue': {
-            'items': revenue_data,
-            'total': total_revenue,
-            'categories': {}
-        },
-        'expenses': {
-            'items': expense_data,
-            'total': total_expense,
-            'categories': {}
-        },
-        'net_income': total_revenue - total_expense
-    }
-
-
-def _get_budget_data(church_id, year, start_date, end_date):
-    """Helper to get budget data"""
-    try:
-        from app.models import Budget
-        
-        revenue_budgets = Budget.query.filter_by(
-            church_id=church_id,
-            fiscal_year=year,
-            budget_type='REVENUE',
-            status='APPROVED'
-        ).all()
-        
-        expense_budgets = Budget.query.filter_by(
-            church_id=church_id,
-            fiscal_year=year,
-            budget_type='EXPENSE',
-            status='APPROVED'
-        ).all()
-        
-        total_revenue_budget = sum(float(b.amount) for b in revenue_budgets)
-        total_expense_budget = sum(float(b.amount) for b in expense_budgets)
-        
-    except:
-        total_revenue_budget = 0
-        total_expense_budget = 0
-        
-        prev_year_start = date(start_date.year - 1, start_date.month, start_date.day)
-        prev_year_end = date(end_date.year - 1, end_date.month, end_date.day)
-        
-        prev_income = _get_income_statement_data(church_id, prev_year_start, prev_year_end)
-        total_revenue_budget = prev_income['revenue']['total'] * 1.05
-        total_expense_budget = prev_income['expenses']['total'] * 1.03
-    
-    return {
-        'revenue_budget': total_revenue_budget,
-        'expense_budget': total_expense_budget
-    }
-
-
-# ==================== TREASURER ENDPOINTS ====================
-
-@accounting_bp.route('/treasurer/category-breakdown', methods=['GET'])
+@accounting_bp.route('/leave/requests/<int:request_id>/pastor-approve', methods=['POST'])
 @token_required
-def get_category_breakdown():
-    """Get category breakdown for treasurer dashboard"""
+def pastor_approve_leave(request_id):
+    """Pastor approve leave request"""
     try:
         church_id = ensure_user_church(g.current_user)
-        period = request.args.get('period', 'month')
+        current_user = g.current_user
         
-        end_date = datetime.utcnow().date()
-        if period == 'month':
-            start_date = end_date.replace(day=1)
-        elif period == 'quarter':
-            quarter = (end_date.month - 1) // 3
-            start_date = date(end_date.year, quarter * 3 + 1, 1)
-        elif period == 'year':
-            start_date = date(end_date.year, 1, 1)
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        if leave_request.status != 'PENDING_PASTOR':
+            return jsonify({'error': f'Cannot approve at current status: {leave_request.status}'}), 400
+        
+        data = request.get_json() or {}
+        
+        leave_request.status = 'APPROVED'
+        leave_request.pastor_id = current_user.id
+        leave_request.pastor_at = datetime.utcnow()
+        leave_request.pastor_comments = data.get('comments', '')
+        
+        balance = LeaveBalance.query.filter_by(
+            employee_id=leave_request.employee_id,
+            leave_type_id=leave_request.leave_type_id,
+            year=leave_request.start_date.year
+        ).first()
+        
+        if balance:
+            balance.used_days += leave_request.days_requested
+            balance.remaining_days -= leave_request.days_requested
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'Leave request approved by Pastor'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving leave: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/leave/requests/<int:request_id>/process-allowance', methods=['POST'])
+@token_required
+def process_leave_allowance(request_id):
+    """Accountant processes leave allowance"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        if leave_request.status != 'APPROVED':
+            return jsonify({'error': 'Request must be approved first'}), 400
+        
+        if leave_request.allowance_processed:
+            return jsonify({'error': 'Allowance already processed'}), 400
+        
+        data = request.get_json() or {}
+        
+        leave_request.allowance_processed = True
+        leave_request.allowance_processed_at = datetime.utcnow()
+        leave_request.accountant_id = current_user.id
+        leave_request.accountant_comments = data.get('comments', '')
+        
+        if data.get('allowance_amount'):
+            leave_request.allowance_amount = data['allowance_amount']
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'Leave allowance processed and sent to Treasurer'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error processing allowance: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/leave/requests/<int:request_id>/treasurer-approve', methods=['POST'])
+@token_required
+def treasurer_approve_allowance(request_id):
+    """Treasurer approves leave allowance"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        if not leave_request.allowance_processed:
+            return jsonify({'error': 'Allowance not processed yet'}), 400
+        
+        if leave_request.allowance_approved:
+            return jsonify({'error': 'Allowance already approved'}), 400
+        
+        data = request.get_json() or {}
+        
+        leave_request.allowance_approved = True
+        leave_request.allowance_approved_at = datetime.utcnow()
+        leave_request.treasurer_id = current_user.id
+        leave_request.treasurer_comments = data.get('comments', '')
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'Allowance approved by Treasurer'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving allowance: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+
+@accounting_bp.route('/leave/requests/<int:request_id>/post-to-ledger', methods=['POST'])
+@token_required
+def post_leave_to_ledger(request_id):
+    """Accountant posts leave payment to ledger"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        if not leave_request.allowance_approved:
+            return jsonify({'error': 'Allowance not approved yet'}), 400
+        
+        if leave_request.posted_to_ledger:
+            return jsonify({'error': 'Already posted to ledger'}), 400
+        
+        # Generate entry number
+        today = datetime.utcnow()
+        date_prefix = today.strftime('%Y%m%d')
+        
+        last_entry = JournalEntry.query.filter(
+            JournalEntry.entry_number.like(f'JE-{date_prefix}-%'),
+            JournalEntry.church_id == church_id
+        ).order_by(JournalEntry.entry_number.desc()).first()
+        
+        if last_entry:
+            seq = int(last_entry.entry_number.split('-')[-1]) + 1
         else:
-            start_date = end_date - timedelta(days=30)
+            seq = 1
         
-        income_by_category = db.session.query(
-            Account.category,
-            func.sum(JournalLine.credit).label('amount')
-        ).join(
-            JournalLine, JournalLine.account_id == Account.id
-        ).join(
-            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-        ).filter(
-            JournalEntry.church_id == church_id,
-            JournalEntry.entry_date >= start_date,
-            JournalEntry.entry_date <= end_date,
-            JournalEntry.status == 'POSTED',
-            Account.account_type == 'REVENUE'
-        ).group_by(Account.category).all()
+        entry_number = f"JE-{date_prefix}-{seq:03d}"
         
-        expense_by_category = db.session.query(
-            Account.category,
-            func.sum(JournalLine.debit).label('amount')
-        ).join(
-            JournalLine, JournalLine.account_id == Account.id
-        ).join(
-            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-        ).filter(
-            JournalEntry.church_id == church_id,
-            JournalEntry.entry_date >= start_date,
-            JournalEntry.entry_date <= end_date,
-            JournalEntry.status == 'POSTED',
-            Account.account_type == 'EXPENSE'
-        ).group_by(Account.category).all()
+        # Create journal entry
+        journal_entry = JournalEntry(
+            church_id=church_id,
+            entry_number=entry_number,
+            entry_date=today.date(),
+            description=f"Leave payment - {leave_request.employee.first_name} {leave_request.employee.last_name}",
+            reference=f"LEAVE-{leave_request.id}",
+            status='POSTED',
+            created_by=current_user.id,
+            created_at=today
+        )
+        db.session.add(journal_entry)
+        db.session.flush()
         
-        income = []
-        total_income = 0
-        for cat, amount in income_by_category:
-            if cat:
-                amount_val = float(amount) if amount else 0
-                income.append({
-                    'category': cat,
-                    'amount': amount_val,
-                    'percentage': 0
-                })
-                total_income += amount_val
+        # Get or create leave expense account
+        expense_account = Account.query.filter_by(
+            church_id=church_id,
+            account_type='EXPENSE',
+            name='Leave Allowance Expense'
+        ).first()
         
-        expenses = []
-        total_expenses = 0
-        for cat, amount in expense_by_category:
-            if cat:
-                amount_val = float(amount) if amount else 0
-                expenses.append({
-                    'category': cat,
-                    'amount': amount_val,
-                    'percentage': 0
-                })
-                total_expenses += amount_val
+        if not expense_account:
+            expense_account = Account(
+                church_id=church_id,
+                account_code='LEAVE_EXP',
+                name='Leave Allowance Expense',
+                account_type='EXPENSE',
+                category='Staff Costs',
+                normal_balance='debit',
+                is_active=True
+            )
+            db.session.add(expense_account)
+            db.session.flush()
         
-        for item in income:
-            item['percentage'] = round((item['amount'] / total_income * 100), 2) if total_income > 0 else 0
+        # Get or create bank account
+        bank_account = Account.query.filter_by(
+            church_id=church_id,
+            account_type='ASSET',
+            category='Bank'
+        ).first()
         
-        for item in expenses:
-            item['percentage'] = round((item['amount'] / total_expenses * 100), 2) if total_expenses > 0 else 0
+        if not bank_account:
+            bank_account = Account(
+                church_id=church_id,
+                account_code='BANK',
+                name='Bank Account',
+                account_type='ASSET',
+                category='Bank',
+                normal_balance='debit',
+                is_active=True
+            )
+            db.session.add(bank_account)
+            db.session.flush()
+        
+        # Create journal lines - REMOVE account_code and account_name
+        debit_line = JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=expense_account.id,
+            debit=float(leave_request.allowance_amount),
+            credit=0
+        )
+        db.session.add(debit_line)
+        
+        credit_line = JournalLine(
+            journal_entry_id=journal_entry.id,
+            account_id=bank_account.id,
+            debit=0,
+            credit=float(leave_request.allowance_amount)
+        )
+        db.session.add(credit_line)
+        
+        leave_request.posted_to_ledger = True
+        leave_request.posted_at = datetime.utcnow()
+        leave_request.posted_by = current_user.id
+        leave_request.journal_entry_id = journal_entry.id
+        leave_request.status = 'PAID'
+        
+        db.session.commit()
         
         return jsonify({
-            'income': income,
-            'expenses': expenses,
-            'total_income': total_income,
-            'total_expenses': total_expenses,
-            'net_income': total_income - total_expenses,
-            'period': period,
-            'start_date': start_date.isoformat(),
-            'end_date': end_date.isoformat()
+            'message': 'Posted to ledger',
+            'journal_entry_id': journal_entry.id,
+            'entry_number': entry_number
         }), 200
         
     except Exception as e:
-        logger.error(f"Error getting category breakdown: {str(e)}")
+        db.session.rollback()
+        logger.error(f"Error posting to ledger: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@accounting_bp.route('/leave/requests/<int:request_id>/reject', methods=['POST'])
+@token_required
+def reject_leave_request(request_id):
+    """Reject leave request at current stage"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        
+        leave_request = LeaveRequest.query.get(request_id)
+        
+        if not leave_request:
+            return jsonify({'error': 'Leave request not found'}), 404
+        
+        if leave_request.employee and leave_request.employee.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        data = request.get_json() or {}
+        reason = data.get('reason', 'No reason provided')
+        
+        if leave_request.status == 'PENDING_PASTOR':
+            leave_request.status = 'REJECTED'
+            leave_request.rejection_stage = 'pastor'
+        elif leave_request.allowance_processed and not leave_request.allowance_approved:
+            leave_request.status = 'REJECTED'
+            leave_request.rejection_stage = 'treasurer'
+        else:
+            return jsonify({'error': 'Cannot reject at this stage'}), 400
+        
+        leave_request.rejected_by = current_user.id
+        leave_request.rejected_at = datetime.utcnow()
+        leave_request.rejection_reason = reason
+        
+        db.session.commit()
+        
+        return jsonify({'message': 'Leave request rejected'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error rejecting leave: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/leave/calendar', methods=['GET'])
+@token_required
+def get_leave_calendar():
+    """Get leave calendar events - shows approved and paid leaves"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        year = request.args.get('year', type=int)
+        month = request.args.get('month', type=int)
+        
+        # Show both APPROVED and PAID leaves
+        query = LeaveRequest.query.join(Employee).filter(
+            Employee.church_id == church_id,
+            LeaveRequest.status.in_(['APPROVED', 'PAID'])
+        )
+        
+        if month and year:
+            start_date = datetime(year, month, 1).date()
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1).date() - timedelta(days=1)
+            else:
+                end_date = datetime(year, month + 1, 1).date() - timedelta(days=1)
+            
+            query = query.filter(
+                LeaveRequest.start_date <= end_date,
+                LeaveRequest.end_date >= start_date
+            )
+        elif year:
+            start_date = datetime(year, 1, 1).date()
+            end_date = datetime(year, 12, 31).date()
+            query = query.filter(
+                LeaveRequest.start_date <= end_date,
+                LeaveRequest.end_date >= start_date
+            )
+        
+        requests = query.all()
+        
+        events = []
+        for req in requests:
+            # Get employee name - handle both property and method
+            employee_name = None
+            if req.employee:
+                if hasattr(req.employee, 'full_name'):
+                    if callable(req.employee.full_name):
+                        employee_name = req.employee.full_name()
+                    else:
+                        employee_name = req.employee.full_name
+                else:
+                    employee_name = f"{req.employee.first_name} {req.employee.last_name}"
+            
+            # Get leave type code
+            leave_type_code = req.leave_type.code if req.leave_type else 'unknown'
+            
+            events.append({
+                'id': req.id,
+                'title': f"{employee_name} - {leave_type_code}",
+                'start': req.start_date.isoformat(),
+                'end': (req.end_date + timedelta(days=1)).isoformat(),
+                'extendedProps': {
+                    'employee_id': req.employee_id,
+                    'employee_name': employee_name,
+                    'leave_type': leave_type_code,
+                    'days': req.days_requested,
+                    'status': req.status,
+                    'allowance_amount': float(req.allowance_amount) if req.allowance_amount else 0
+                }
+            })
+        
+        return jsonify(events), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching calendar: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@accounting_bp.route('/leave/workflow-summary', methods=['GET'])
+@token_required
+def get_workflow_summary():
+    """Get workflow summary counts for leave management dashboard"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        summary = {
+            'pending_pastor': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id,
+                LeaveRequest.status == 'PENDING_PASTOR'
+            ).count(),
+            'pending_allowance': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id,
+                LeaveRequest.status == 'APPROVED',
+                LeaveRequest.allowance_processed == False
+            ).count(),
+            'pending_treasurer': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id,
+                LeaveRequest.allowance_processed == True,
+                LeaveRequest.allowance_approved == False
+            ).count(),
+            'pending_payment': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id,
+                LeaveRequest.allowance_approved == True,
+                LeaveRequest.posted_to_ledger == False
+            ).count(),
+            'completed': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id,
+                LeaveRequest.status == 'PAID'
+            ).count(),
+            'total_requests': LeaveRequest.query.join(Employee).filter(
+                Employee.church_id == church_id
+            ).count()
+        }
+        
+        return jsonify(summary), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting workflow summary: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
 # ==================== DEBUG ENDPOINTS ====================
 
-@accounting_bp.route('/debug-db', methods=['GET'])
-@token_required
-def debug_db():
-    """Debug endpoint to show database info"""
-    try:
-        db_path = db.engine.url.database
-        return jsonify({
-            'database_path': db_path,
-            'file_exists': os.path.exists(db_path),
-            'file_size': os.path.getsize(db_path) if os.path.exists(db_path) else 0,
-            'tables': db.engine.table_names()
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @accounting_bp.route('/test', methods=['GET'])
 def test():
     """Simple test endpoint"""
-    try:
-        db_path = db.engine.url.database
-        return jsonify({
-            'status': 'ok',
-            'database': db_path,
-            'exists': os.path.exists(db_path),
-            'size': os.path.getsize(db_path) if os.path.exists(db_path) else 0
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    return jsonify({
+        'status': 'ok',
+        'message': 'Accounting blueprint is working!'
+    }), 200
