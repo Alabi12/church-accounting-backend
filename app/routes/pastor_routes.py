@@ -1,7 +1,7 @@
 # app/routes/pastor_routes.py
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import Budget, User, AuditLog, Church
+from app.models import Budget, User, AuditLog, Church, JournalEntry, JournalLine, Account
 from app.extensions import db
 from datetime import datetime, timedelta
 from sqlalchemy import func, or_
@@ -70,6 +70,17 @@ def ensure_user_church(user=None):
         raise ValueError(f"Could not determine church: {str(e)}")
 
 
+def _get_expense_status(status):
+    """Convert internal status to display status"""
+    status_map = {
+        'PENDING': 'pending',
+        'DRAFT': 'pending',
+        'POSTED': 'approved',
+        'REJECTED': 'rejected'
+    }
+    return status_map.get(status, 'pending')
+
+
 # ==================== DASHBOARD STATS ====================
 
 @pastor_bp.route('/dashboard-stats', methods=['GET', 'OPTIONS'])
@@ -98,7 +109,7 @@ def get_dashboard_stats():
         # Count high priority pending budgets
         high_priority_pending = len([b for b in all_budgets if b.status == 'PENDING' and b.priority == 'HIGH'])
         
-        # Calculate average response time (time from submission to approval/rejection)
+        # Calculate average response time
         response_times = []
         for budget in all_budgets:
             if budget.submitted_at and (budget.approved_at or budget.rejected_at):
@@ -268,7 +279,6 @@ def approve_budget(budget_id):
             return jsonify({'error': f'Budget is already {budget.status.lower()}'}), 400
         
         # Update budget
-        old_status = budget.status
         budget.status = 'APPROVED'
         budget.approved_by = current_user.id if current_user else None
         budget.approved_at = datetime.utcnow()
@@ -337,7 +347,6 @@ def reject_budget(budget_id):
             return jsonify({'error': f'Budget is already {budget.status.lower()}'}), 400
         
         # Update budget
-        old_status = budget.status
         budget.status = 'REJECTED'
         budget.rejected_by = current_user.id if current_user else None
         budget.rejected_at = datetime.utcnow()
@@ -540,6 +549,244 @@ def search_budgets():
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== EXPENSE APPROVALS ====================
+
+@pastor_bp.route('/departments', methods=['GET', 'OPTIONS'])
+@token_required
+def get_departments():
+    """Get list of departments for filtering"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get unique departments from expense accounts
+        departments = db.session.query(Account.category).filter(
+            Account.church_id == church_id,
+            Account.account_type == 'EXPENSE',
+            Account.category.isnot(None)
+        ).distinct().all()
+        
+        dept_list = [d[0] for d in departments if d[0]]
+        
+        # Add common departments if none found
+        if not dept_list:
+            dept_list = ['Youth Ministry', 'Worship', 'Outreach', 'Missions', 'Administration']
+        
+        return jsonify({'departments': dept_list}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching departments: {str(e)}")
+        return jsonify({'departments': []}), 200
+
+
+@pastor_bp.route('/expense-approvals', methods=['GET', 'OPTIONS'])
+@token_required
+def get_expense_approvals():
+    """Get expense requests pending approval"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get query parameters
+        status = request.args.get('status', 'pending')
+        department = request.args.get('department')
+        search = request.args.get('search')
+        
+        # Build query for expense journal entries
+        query = JournalEntry.query.join(
+            JournalLine, JournalEntry.id == JournalLine.journal_entry_id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            Account.account_type == 'EXPENSE'
+        )
+        
+        # Apply status filter
+        if status == 'pending':
+            query = query.filter(JournalEntry.status.in_(['PENDING', 'DRAFT']))
+        elif status == 'approved':
+            query = query.filter(JournalEntry.status == 'POSTED')
+        elif status == 'rejected':
+            query = query.filter(JournalEntry.status == 'REJECTED')
+        
+        # Apply department filter
+        if department and department != 'all':
+            query = query.filter(Account.category == department)
+        
+        # Apply search filter
+        if search:
+            query = query.filter(
+                or_(
+                    JournalEntry.description.ilike(f'%{search}%'),
+                    JournalEntry.reference.ilike(f'%{search}%')
+                )
+            )
+        
+        # Order by date
+        query = query.order_by(JournalEntry.entry_date.desc())
+        
+        expenses = query.all()
+        
+        # Format expenses
+        expenses_data = []
+        total_amount = 0
+        
+        for entry in expenses:
+            # Calculate total amount
+            amount = 0
+            dept = None
+            for line in entry.lines:
+                amount += line.debit or 0
+                if not dept:
+                    account = Account.query.get(line.account_id)
+                    if account:
+                        dept = account.category
+            
+            expenses_data.append({
+                'id': entry.id,
+                'date': entry.entry_date.isoformat(),
+                'description': entry.description or 'Expense Request',
+                'amount': float(amount),
+                'category': dept or 'General',
+                'department': dept or 'General',
+                'requestedBy': getattr(entry, 'created_by_name', 'Unknown'),
+                'submittedDate': entry.created_at.isoformat() if entry.created_at else entry.entry_date.isoformat(),
+                'status': _get_expense_status(entry.status),
+                'justification': entry.description or 'No justification provided',
+                'attachments': [],
+                'approvedBy': getattr(entry, 'approved_by_name', None),
+                'approvedDate': entry.approved_at.isoformat() if hasattr(entry, 'approved_at') and entry.approved_at else None,
+                'rejectionReason': None
+            })
+            total_amount += amount
+        
+        # Calculate stats
+        stats = {
+            'pending': len([e for e in expenses_data if e['status'] == 'pending']),
+            'approved': len([e for e in expenses_data if e['status'] == 'approved']),
+            'rejected': len([e for e in expenses_data if e['status'] == 'rejected']),
+            'totalAmount': total_amount
+        }
+        
+        return jsonify({
+            'expenses': expenses_data,
+            'stats': stats
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching expense approvals: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@pastor_bp.route('/expense-approvals/<int:expense_id>/approve', methods=['POST', 'OPTIONS'])
+@token_required
+def approve_expense(expense_id):
+    """Approve an expense request"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        
+        journal_entry = JournalEntry.query.filter_by(
+            id=expense_id,
+            church_id=church_id
+        ).first()
+        
+        if not journal_entry:
+            return jsonify({'error': 'Expense not found'}), 404
+        
+        if journal_entry.status not in ['PENDING', 'DRAFT']:
+            return jsonify({'error': f'Expense is already {journal_entry.status}'}), 400
+        
+        # Update status
+        journal_entry.status = 'POSTED'
+        journal_entry.approved_by = current_user.id if current_user else None
+        journal_entry.approved_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id if current_user else None,
+            action='APPROVE_EXPENSE',
+            resource='journal_entry',
+            resource_id=expense_id,
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        return jsonify({'message': 'Expense approved successfully'}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error approving expense: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@pastor_bp.route('/expense-approvals/<int:expense_id>/reject', methods=['POST', 'OPTIONS'])
+@token_required
+def reject_expense(expense_id):
+    """Reject an expense request"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = get_current_user()
+        
+        data = request.get_json() or {}
+        reason = data.get('reason', 'No reason provided')
+        
+        journal_entry = JournalEntry.query.filter_by(
+            id=expense_id,
+            church_id=church_id
+        ).first()
+        
+        if not journal_entry:
+            return jsonify({'error': 'Expense not found'}), 404
+        
+        if journal_entry.status not in ['PENDING', 'DRAFT']:
+            return jsonify({'error': f'Expense is already {journal_entry.status}'}), 400
+        
+        # Update status
+        journal_entry.status = 'REJECTED'
+        journal_entry.rejected_by = current_user.id if current_user else None
+        journal_entry.rejected_at = datetime.utcnow()
+        journal_entry.rejection_reason = reason
+        
+        db.session.commit()
+        
+        # Log audit
+        audit_log = AuditLog(
+            user_id=current_user.id if current_user else None,
+            action='REJECT_EXPENSE',
+            resource='journal_entry',
+            resource_id=expense_id,
+            data={'reason': reason},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string if request.user_agent else None
+        )
+        db.session.add(audit_log)
+        db.session.commit()
+        
+        return jsonify({'message': 'Expense rejected', 'reason': reason}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error rejecting expense: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
 # ==================== DEBUG ENDPOINT ====================
 
 @pastor_bp.route('/debug', methods=['GET', 'OPTIONS'])
@@ -564,6 +811,12 @@ def debug_pastor():
                 'pending': Budget.query.filter_by(church_id=church_id, status='PENDING').count(),
                 'approved': Budget.query.filter_by(church_id=church_id, status='APPROVED').count(),
                 'rejected': Budget.query.filter_by(church_id=church_id, status='REJECTED').count()
+            },
+            'expense_stats': {
+                'total': JournalEntry.query.filter_by(church_id=church_id).count(),
+                'pending': JournalEntry.query.filter_by(church_id=church_id, status='PENDING').count(),
+                'approved': JournalEntry.query.filter_by(church_id=church_id, status='POSTED').count(),
+                'rejected': JournalEntry.query.filter_by(church_id=church_id, status='REJECTED').count()
             }
         }
         
@@ -571,4 +824,171 @@ def debug_pastor():
         
     except Exception as e:
         logger.error(f"Error in debug endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Add to pastor_routes.py
+
+@pastor_bp.route('/members', methods=['GET', 'OPTIONS'])
+@token_required
+def get_members():
+    """Get all members for pastor view"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get all members (users with role 'member')
+        members = User.query.filter_by(
+            church_id=church_id,
+            role='member'
+        ).all()
+        
+        members_list = []
+        total_giving = 0
+        
+        for member in members:
+            # Calculate total giving from journal entries
+            total_given = db.session.query(func.sum(JournalLine.credit)).join(
+                JournalEntry, JournalEntry.id == JournalLine.journal_entry_id
+            ).filter(
+                JournalEntry.church_id == church_id,
+                JournalEntry.created_by == member.id,
+                JournalEntry.entry_type == 'RECEIPT'
+            ).scalar() or 0
+            
+            # Get last gift date
+            last_gift = db.session.query(JournalEntry.entry_date).join(
+                JournalLine, JournalEntry.id == JournalLine.journal_entry_id
+            ).filter(
+                JournalEntry.church_id == church_id,
+                JournalEntry.created_by == member.id,
+                JournalLine.credit > 0
+            ).order_by(JournalEntry.entry_date.desc()).first()
+            
+            members_list.append({
+                'id': member.id,
+                'name': member.full_name,
+                'email': member.email,
+                'phone': member.phone or '',
+                'joinDate': member.created_at.isoformat() if member.created_at else None,
+                'totalGiven': float(total_given),
+                'lastGift': last_gift[0].isoformat() if last_gift else None,
+                'givingFrequency': 'monthly',  # Calculate based on history
+                'status': 'active' if member.is_active else 'inactive'
+            })
+            total_giving += float(total_given)
+        
+        # Calculate stats
+        stats = {
+            'totalGivers': len(members_list),
+            'totalAmount': total_giving,
+            'averageGift': total_giving / len(members_list) if members_list else 0,
+            'topGiver': members_list[0]['name'] if members_list else '',
+            'monthlyTotal': total_giving / 12 if total_giving > 0 else 0,
+            'growth': 12.5  # Calculate from historical data
+        }
+        
+        return jsonify({
+            'members': members_list,
+            'stats': stats
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting members: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@pastor_bp.route('/members/<int:member_id>/giving', methods=['GET', 'OPTIONS'])
+@token_required
+def get_member_giving(member_id):
+    """Get giving history for a specific member"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        church_id = ensure_user_church(g.current_user)
+        start_date = request.args.get('startDate')
+        end_date = request.args.get('endDate')
+        
+        # Verify member belongs to this church
+        member = User.query.filter_by(
+            id=member_id,
+            church_id=church_id,
+            role='member'
+        ).first()
+        
+        if not member:
+            return jsonify({'error': 'Member not found'}), 404
+        
+        # Build query for giving history
+        query = JournalEntry.query.join(
+            JournalLine, JournalEntry.id == JournalLine.journal_entry_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.created_by == member_id,
+            JournalEntry.entry_type == 'RECEIPT',
+            JournalLine.credit > 0
+        )
+        
+        if start_date:
+            query = query.filter(JournalEntry.entry_date >= start_date)
+        if end_date:
+            query = query.filter(JournalEntry.entry_date <= end_date)
+        
+        entries = query.order_by(JournalEntry.entry_date.desc()).all()
+        
+        # Format giving history
+        history = []
+        monthly_data = {}
+        category_data = {}
+        
+        for entry in entries:
+            amount = 0
+            category = 'tithe'  # Default category
+            
+            for line in entry.lines:
+                if line.credit > 0:
+                    amount = line.credit
+                    # Try to determine category from account
+                    account = Account.query.get(line.account_id)
+                    if account:
+                        if 'tithe' in account.name.lower():
+                            category = 'tithe'
+                        elif 'offering' in account.name.lower():
+                            category = 'offering'
+                        else:
+                            category = 'special'
+                    break
+            
+            history.append({
+                'date': entry.entry_date.isoformat(),
+                'amount': float(amount),
+                'category': category,
+                'method': 'online'  # You can track this in your transactions table
+            })
+            
+            # Aggregate for monthly chart
+            month_key = entry.entry_date.strftime('%b')
+            monthly_data[month_key] = monthly_data.get(month_key, 0) + float(amount)
+            
+            # Aggregate for category chart
+            category_data[category] = category_data.get(category, 0) + float(amount)
+        
+        # Format chart data
+        chart_data = [{'month': month, 'amount': amount} for month, amount in monthly_data.items()]
+        
+        # Format category data
+        category_chart_data = [{'name': k.capitalize(), 'value': v} for k, v in category_data.items()]
+        
+        return jsonify({
+            'history': history,
+            'chartData': chart_data,
+            'categoryData': category_chart_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting member giving: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500

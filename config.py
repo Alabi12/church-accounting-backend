@@ -5,6 +5,7 @@ from datetime import timedelta
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY', 'neondb_owner:npg_cUTJLED2q6XC@ep-snowy-shape-amae5iiu-pooler.c-5.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
     
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-key-change-in-production')
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
