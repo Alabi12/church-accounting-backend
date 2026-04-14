@@ -272,6 +272,8 @@ def create_app(config_name='development'):
         from app.routes.payslip_routes import payslip_bp
         from app.routes.leave_routes import leave_bp
         from app.routes.tax_routes import tax_bp
+        from app.routes.audit_routes import audit_bp
+
         
         app.register_blueprint(auth_bp, url_prefix='/api/auth')
         app.register_blueprint(budget_bp, url_prefix='/api/budgets')
@@ -293,6 +295,8 @@ def create_app(config_name='development'):
         app.register_blueprint(payslip_bp, url_prefix='/api/payslip')
         app.register_blueprint(leave_bp, url_prefix='/api/leave')
         app.register_blueprint(tax_bp, url_prefix='/api/tax')
+        app.register_blueprint(audit_bp, url_prefix='/api/audit')
+
         
         print("[STEP 14] Blueprints registered successfully")
     except Exception as e:

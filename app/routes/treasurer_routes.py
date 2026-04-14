@@ -1,20 +1,487 @@
 # app/routes/treasurer_routes.py
 from flask import Blueprint, request, jsonify, g, make_response
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import Budget, Transaction, Account, User, AuditLog, Church
+from app.models import Budget, Transaction, Account, User, AuditLog, Church, JournalEntry, JournalLine
+from app.routes.accounting_routes import get_account_balance, ensure_user_church  # Add this import
 from app.extensions import db
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from sqlalchemy import func, and_, or_, desc, extract
 import traceback
 import logging
 
 logger = logging.getLogger(__name__)
-treasurer_bp = Blueprint('treasurer', __name__)
+# treasurer_bp = Blueprint('treasurer', __name__)
+treasurer_bp = Blueprint('treasurer', __name__, url_prefix='/api/treasurer')
 
 # Import token_required from auth_routes
 from app.routes.auth_routes import token_required
 
+@treasurer_bp.route('/financial-overview', methods=['GET'])
+@token_required
+def get_financial_overview():
+    """Get financial overview for dashboard"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get parameters
+        period = request.args.get('period', 'month')
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if start_date_str and end_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        elif period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Calculate totals
+        # Get revenue accounts
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        total_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_income += balance
+        
+        # Get expense accounts
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        total_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_expenses += balance
+        
+        # Get asset accounts for balance sheet
+        asset_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='ASSET', is_active=True
+        ).all()
+        
+        total_assets = 0
+        for acc in asset_accounts:
+            total_assets += acc.current_balance or 0
+        
+        # Get liability accounts
+        liability_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='LIABILITY', is_active=True
+        ).all()
+        
+        total_liabilities = 0
+        for acc in liability_accounts:
+            total_liabilities += acc.current_balance or 0
+        
+        # Get equity accounts
+        equity_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EQUITY', is_active=True
+        ).all()
+        
+        total_equity = 0
+        for acc in equity_accounts:
+            total_equity += acc.current_balance or 0
+        
+        # Get income by category
+        income_by_category = []
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                income_by_category.append({
+                    'category': acc.category or 'Other',
+                    'amount': float(balance)
+                })
+        
+        # Get expenses by category
+        expenses_by_category = []
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                expenses_by_category.append({
+                    'category': acc.category or 'Other',
+                    'amount': float(balance)
+                })
+        
+        # Calculate percentage changes
+        # Get previous period for comparison
+        days_diff = (end_date - start_date).days
+        prev_end_date = start_date - timedelta(days=1)
+        prev_start_date = prev_end_date - timedelta(days=days_diff)
+        
+        prev_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_income += balance
+        
+        prev_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_expenses += balance
+        
+        income_change = ((total_income - prev_income) / prev_income * 100) if prev_income > 0 else 0
+        expense_change = ((total_expenses - prev_expenses) / prev_expenses * 100) if prev_expenses > 0 else 0
+        
+        return jsonify({
+            'success': True,
+            'period': {
+                'startDate': start_date.isoformat(),
+                'endDate': end_date.isoformat(),
+                'period': period
+            },
+            'summary': {
+                'totalIncome': float(total_income),
+                'totalExpenses': float(total_expenses),
+                'netIncome': float(total_income - total_expenses),
+                'incomeChange': round(income_change, 1),
+                'expenseChange': round(expense_change, 1)
+            },
+            'balanceSheet': {
+                'totalAssets': float(total_assets),
+                'totalLiabilities': float(total_liabilities),
+                'totalEquity': float(total_equity)
+            },
+            'incomeByCategory': income_by_category,
+            'expensesByCategory': expenses_by_category
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in financial-overview endpoint: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
+@treasurer_bp.route('/income-vs-expenses', methods=['GET'])
+@token_required
+def get_income_vs_expenses():
+    """Get income vs expenses comparison for charts"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get parameters
+        period = request.args.get('period', 'month')
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if start_date_str and end_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        elif period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get revenue accounts
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        total_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_income += balance
+        
+        # Get expense accounts
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        total_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_expenses += balance
+        
+        # Calculate previous period for comparison
+        days_diff = (end_date - start_date).days
+        prev_end_date = start_date - timedelta(days=1)
+        prev_start_date = prev_end_date - timedelta(days=days_diff)
+        
+        prev_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_income += balance
+        
+        prev_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_expenses += balance
+        
+        income_change = ((total_income - prev_income) / prev_income * 100) if prev_income > 0 else 0
+        expense_change = ((total_expenses - prev_expenses) / prev_expenses * 100) if prev_expenses > 0 else 0
+        
+        # Generate monthly data for chart
+        monthly_data = []
+        current = start_date
+        while current <= end_date:
+            if current.month == 12:
+                month_end = date(current.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(current.year, current.month + 1, 1) - timedelta(days=1)
+            month_end = min(month_end, end_date)
+            
+            month_income = 0
+            for acc in revenue_accounts:
+                balance = get_account_balance(acc.id, current, month_end)
+                if balance > 0:
+                    month_income += balance
+            
+            month_expenses = 0
+            for acc in expense_accounts:
+                balance = get_account_balance(acc.id, current, month_end)
+                if balance > 0:
+                    month_expenses += balance
+            
+            monthly_data.append({
+                'month': current.strftime('%b'),
+                'income': float(month_income),
+                'expenses': float(month_expenses),
+                'net': float(month_income - month_expenses)
+            })
+            
+            if current.month == 12:
+                current = date(current.year + 1, 1, 1)
+            else:
+                current = date(current.year, current.month + 1, 1)
+        
+        return jsonify({
+            'income': float(total_income),
+            'expenses': float(total_expenses),
+            'net': float(total_income - total_expenses),
+            'incomeChange': round(income_change, 1),
+            'expenseChange': round(expense_change, 1),
+            'data': monthly_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in income-vs-expenses endpoint: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
+    
+
+@treasurer_bp.route('/category-breakdown', methods=['GET'])
+@token_required
+def get_category_breakdown():
+    """Get income and expense breakdown by category"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        period = request.args.get('period', 'month')
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get income by category
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        income_categories = []
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                income_categories.append({
+                    'name': acc.category or 'Other Income',
+                    'value': float(balance),
+                    'color': '#10b981'
+                })
+        
+        # Get expenses by category
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        expense_categories = []
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                expense_categories.append({
+                    'name': acc.category or 'Other Expenses',
+                    'value': float(balance),
+                    'color': '#ef4444'
+                })
+        
+        return jsonify({
+            'income': income_categories,
+            'expenses': expense_categories
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in category-breakdown endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
+        
+@treasurer_bp.route('/income-expense-trends', methods=['GET'])
+@token_required
+def get_income_expense_trends():
+    """Get income and expense trends over time"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        months = request.args.get('months', 6, type=int)
+        
+        # Get revenue and expense accounts
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        # Generate monthly data
+        trends = []
+        end_date = datetime.utcnow().date()
+        
+        for i in range(months - 1, -1, -1):
+            # Calculate month start and end
+            month_date = date(end_date.year, end_date.month, 1) - timedelta(days=i * 30)
+            month_start = date(month_date.year, month_date.month, 1)
+            
+            if month_date.month == 12:
+                month_end = date(month_date.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(month_date.year, month_date.month + 1, 1) - timedelta(days=1)
+            
+            # Calculate monthly income
+            monthly_income = 0
+            for acc in revenue_accounts:
+                balance = get_account_balance(acc.id, month_start, month_end)
+                if balance > 0:
+                    monthly_income += balance
+            
+            # Calculate monthly expenses
+            monthly_expenses = 0
+            for acc in expense_accounts:
+                balance = get_account_balance(acc.id, month_start, month_end)
+                if balance > 0:
+                    monthly_expenses += balance
+            
+            trends.append({
+                'month': month_start.strftime('%b'),
+                'income': float(monthly_income),
+                'expenses': float(monthly_expenses),
+                'net': float(monthly_income - monthly_expenses)
+            })
+        
+        return jsonify(trends), 200
+        
+    except Exception as e:
+        logger.error(f"Error in trends endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@treasurer_bp.route('/recent-transactions', methods=['GET'])
+@token_required
+def get_recent_transactions():
+    """Get recent transactions for the dashboard"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        limit = request.args.get('limit', 10, type=int)
+        
+        # Get recent journal entries
+        journal_entries = JournalEntry.query.filter_by(
+            church_id=church_id,
+            status='POSTED'
+        ).order_by(
+            JournalEntry.entry_date.desc(),
+            JournalEntry.created_at.desc()
+        ).limit(limit).all()
+        
+        transactions = []
+        for je in journal_entries:
+            transactions.append({
+                'id': je.id,
+                'date': je.entry_date.isoformat(),
+                'description': je.description or 'Journal Entry',
+                'reference': je.entry_number,
+                'amount': float(sum(line.debit for line in je.lines) or sum(line.credit for line in je.lines)),
+                'type': 'journal'
+            })
+        
+        return jsonify({'transactions': transactions}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching recent transactions: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@treasurer_bp.route('/alerts', methods=['GET'])
+@token_required
+def get_treasurer_alerts():
+    """Get alerts for the treasurer dashboard"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        alerts = []
+        
+        # Check for pending budgets
+        pending_budgets = Budget.query.filter_by(
+            church_id=church_id,
+            status='PENDING'
+        ).count()
+        
+        if pending_budgets > 0:
+            alerts.append({
+                'id': 1,
+                'type': 'warning',
+                'message': f'{pending_budgets} budget(s) pending approval',
+                'severity': 'medium'
+            })
+        
+        # Check for negative cash balance
+        cash_accounts = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'ASSET',
+            Account.category == 'Cash'
+        ).all()
+        
+        negative_cash = any(acc.current_balance < 0 for acc in cash_accounts)
+        if negative_cash:
+            alerts.append({
+                'id': 2,
+                'type': 'critical',
+                'message': 'Negative cash balance detected',
+                'severity': 'high'
+            })
+        
+        return jsonify({'alerts': alerts}), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching alerts: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
 # ==================== HELPER FUNCTIONS ====================
 
 def get_current_user():
@@ -49,6 +516,158 @@ def ensure_user_church(user=None):
     return user.church_id
 
 
+@treasurer_bp.route('/cash-flow', methods=['GET'])
+@token_required
+def get_cash_flow():
+    """Get cash flow statement for a period"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get parameters
+        period = request.args.get('period', 'month')  # month, quarter, year
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        account_id = request.args.get('accountId', type=int)
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        elif start_date_str and end_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get cash accounts
+        if account_id:
+            cash_accounts = Account.query.filter_by(id=account_id, church_id=church_id, is_active=True).all()
+        else:
+            cash_accounts = Account.query.filter(
+                Account.church_id == church_id,
+                Account.account_type == 'ASSET',
+                Account.is_active == True,
+                or_(
+                    Account.category == 'Cash',
+                    Account.category == 'Bank',
+                    Account.name.ilike('%cash%'),
+                    Account.name.ilike('%bank%')
+                )
+            ).all()
+        
+        # Calculate cash flow components
+        operating_cash_flow = 0
+        investing_cash_flow = 0
+        financing_cash_flow = 0
+        
+        # Get revenue (operating inflow)
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                operating_cash_flow += balance
+        
+        # Get expenses (operating outflow)
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                operating_cash_flow -= balance
+        
+        # Get asset purchases (investing outflow)
+        asset_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='ASSET', is_active=True
+        ).filter(
+            ~Account.category.in_(['Cash', 'Bank'])
+        ).all()
+        
+        for acc in asset_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                investing_cash_flow -= balance
+        
+        # Get loans/equity (financing inflow/outflow)
+        liability_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='LIABILITY', is_active=True
+        ).all()
+        
+        for acc in liability_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                financing_cash_flow += balance
+            elif balance < 0:
+                financing_cash_flow -= abs(balance)
+        
+        # Get beginning and ending cash balances
+        beginning_cash = sum(get_account_balance(acc.id, None, start_date - timedelta(days=1)) for acc in cash_accounts)
+        ending_cash = sum(get_account_balance(acc.id, None, end_date) for acc in cash_accounts)
+        net_cash_flow = ending_cash - beginning_cash
+        
+        # Get monthly breakdown for chart
+        monthly_data = []
+        current_date = start_date
+        while current_date <= end_date:
+            month_start = current_date
+            if current_date.month == 12:
+                month_end = date(current_date.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(current_date.year, current_date.month + 1, 1) - timedelta(days=1)
+            
+            month_operating = 0
+            for acc in revenue_accounts:
+                balance = get_account_balance(acc.id, month_start, month_end)
+                if balance > 0:
+                    month_operating += balance
+            for acc in expense_accounts:
+                balance = get_account_balance(acc.id, month_start, month_end)
+                if balance > 0:
+                    month_operating -= balance
+            
+            monthly_data.append({
+                'month': month_start.strftime('%b'),
+                'operating': month_operating,
+                'net': month_operating
+            })
+            
+            current_date = month_end + timedelta(days=1)
+        
+        return jsonify({
+            'period': {
+                'startDate': start_date.isoformat(),
+                'endDate': end_date.isoformat(),
+                'period': period
+            },
+            'cashAccounts': [{
+                'id': acc.id,
+                'name': acc.name,
+                'balance': float(acc.current_balance) if acc.current_balance else 0
+            } for acc in cash_accounts],
+            'operatingCashFlow': float(operating_cash_flow),
+            'investingCashFlow': float(investing_cash_flow),
+            'financingCashFlow': float(financing_cash_flow),
+            'netCashFlow': float(net_cash_flow),
+            'beginningCash': float(beginning_cash),
+            'endingCash': float(ending_cash),
+            'monthlyData': monthly_data,
+            'transactions': []
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting cash flow: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    
 # ==================== DASHBOARD STATS ====================
 
 @treasurer_bp.route('/dashboard-stats', methods=['GET', 'OPTIONS'])
