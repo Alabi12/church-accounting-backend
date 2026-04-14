@@ -11,6 +11,8 @@ from app.models import User, Account, Church, JournalEntry, JournalLine, Employe
 from app.models.leave import LeaveRequest, LeaveBalance, LeaveType
 from app.extensions import db
 from app.routes.auth_routes import token_required
+# from sqlalchemy import func, or_, and_
+# from datetime import datetime, timedelta, date
 
 logger = logging.getLogger(__name__)
 accounting_bp = Blueprint('accounting', __name__)
@@ -95,9 +97,29 @@ def get_dashboard_stats():
     try:
         church_id = ensure_user_church(g.current_user)
         
-        today = datetime.utcnow()
-        month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Get date parameters
+        month = request.args.get('month', type=int)
+        year = request.args.get('year', type=int)
         
+        # Set date range
+        if month and year:
+            start_datetime = datetime(year, month, 1, 0, 0, 0)
+            if month == 12:
+                end_datetime = datetime(year + 1, 1, 1, 0, 0, 0) - timedelta(seconds=1)
+            else:
+                end_datetime = datetime(year, month + 1, 1, 0, 0, 0) - timedelta(seconds=1)
+        else:
+            # Default to current month
+            now = datetime.utcnow()
+            year = now.year
+            month = now.month
+            start_datetime = datetime(year, month, 1, 0, 0, 0)
+            if month == 12:
+                end_datetime = datetime(year + 1, 1, 1, 0, 0, 0) - timedelta(seconds=1)
+            else:
+                end_datetime = datetime(year, month + 1, 1, 0, 0, 0) - timedelta(seconds=1)
+        
+        # Calculate total income from POSTED journal entries for revenue accounts
         total_income = db.session.query(
             func.sum(JournalLine.credit)
         ).join(
@@ -106,12 +128,13 @@ def get_dashboard_stats():
             Account, Account.id == JournalLine.account_id
         ).filter(
             JournalEntry.church_id == church_id,
-            JournalEntry.entry_date >= month_start,
-            JournalEntry.entry_date <= today,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
             JournalEntry.status == 'POSTED',
             Account.account_type == 'REVENUE'
         ).scalar() or 0
         
+        # Calculate total expenses from POSTED journal entries for expense accounts
         total_expenses = db.session.query(
             func.sum(JournalLine.debit)
         ).join(
@@ -120,12 +143,95 @@ def get_dashboard_stats():
             Account, Account.id == JournalLine.account_id
         ).filter(
             JournalEntry.church_id == church_id,
-            JournalEntry.entry_date >= month_start,
-            JournalEntry.entry_date <= today,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
             JournalEntry.status == 'POSTED',
             Account.account_type == 'EXPENSE'
         ).scalar() or 0
         
+        # Get income by category
+        income_by_category = db.session.query(
+            Account.category,
+            func.sum(JournalLine.credit).label('total')
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'REVENUE'
+        ).group_by(Account.category).all()
+        
+        # Get expenses by category
+        expense_by_category = db.session.query(
+            Account.category,
+            func.sum(JournalLine.debit).label('total')
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'EXPENSE'
+        ).group_by(Account.category).all()
+        
+        # Format category data
+        income_categories = []
+        for cat in income_by_category:
+            if cat.category:
+                income_categories.append({
+                    'category': cat.category,
+                    'total': float(cat.total) if cat.total else 0
+                })
+        
+        expense_categories = []
+        for cat in expense_by_category:
+            if cat.category:
+                expense_categories.append({
+                    'category': cat.category,
+                    'total': float(cat.total) if cat.total else 0
+                })
+        
+        # Get account balances by type
+        account_balances = db.session.query(
+            Account.account_type,
+            func.sum(Account.current_balance).label('total')
+        ).filter(
+            Account.church_id == church_id,
+            Account.is_active == True
+        ).group_by(Account.account_type).all()
+        
+        balances_dict = {'ASSET': 0, 'LIABILITY': 0, 'EQUITY': 0, 'REVENUE': 0, 'EXPENSE': 0}
+        for acc_type, total in account_balances:
+            if acc_type in balances_dict:
+                balances_dict[acc_type] = float(total) if total else 0
+        
+        # Get cash and bank balances
+        cash_balance = db.session.query(
+            func.sum(Account.current_balance)
+        ).filter(
+            Account.church_id == church_id,
+            Account.is_active == True,
+            Account.account_type == 'ASSET',
+            Account.account_code.like('1010%')
+        ).scalar() or 0
+        
+        bank_balance = db.session.query(
+            func.sum(Account.current_balance)
+        ).filter(
+            Account.church_id == church_id,
+            Account.is_active == True,
+            Account.account_type == 'ASSET',
+            Account.account_code.like('1020%')
+        ).scalar() or 0
+        
+        # Get account counts
         account_counts = db.session.query(
             Account.account_type,
             func.count(Account.id).label('count')
@@ -136,6 +242,7 @@ def get_dashboard_stats():
         
         counts_dict = {acc_type: count for acc_type, count in account_counts}
         
+        # Get journal entry stats
         entry_counts = db.session.query(
             JournalEntry.status,
             func.count(JournalEntry.id).label('count')
@@ -145,9 +252,10 @@ def get_dashboard_stats():
         
         entry_dict = {status: count for status, count in entry_counts}
         
+        # Count recent entries (this month)
         recent_count = JournalEntry.query.filter(
             JournalEntry.church_id == church_id,
-            JournalEntry.entry_date >= month_start
+            JournalEntry.entry_date >= start_datetime
         ).count()
         
         return jsonify({
@@ -162,8 +270,16 @@ def get_dashboard_stats():
                 'void': entry_dict.get('VOID', 0)
             },
             'recentEntries': recent_count,
-            'incomeByCategory': [],
-            'expenseByCategory': []
+            'incomeByCategory': income_categories,
+            'expenseByCategory': expense_categories,
+            # Add these for the other cards
+            'cashBalance': float(cash_balance),
+            'bankBalance': float(bank_balance),
+            'assetBalance': balances_dict.get('ASSET', 0),
+            'liabilityBalance': balances_dict.get('LIABILITY', 0),
+            'equityBalance': balances_dict.get('EQUITY', 0),
+            'revenueBalance': balances_dict.get('REVENUE', 0),
+            'expenseBalance': balances_dict.get('EXPENSE', 0)
         }), 200
         
     except Exception as e:
@@ -171,6 +287,61 @@ def get_dashboard_stats():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@accounting_bp.route('/dashboard-ytd', methods=['GET'])
+@token_required
+def get_dashboard_ytd():
+    """Get year-to-date dashboard statistics"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get year parameter
+        year = request.args.get('year', type=int, default=datetime.utcnow().year)
+        
+        # Set date range to full year
+        start_datetime = datetime(year, 1, 1, 0, 0, 0)
+        end_datetime = datetime(year, 12, 31, 23, 59, 59)
+        
+        # Calculate YTD income
+        total_income = db.session.query(
+            func.sum(JournalLine.credit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'REVENUE'
+        ).scalar() or 0
+        
+        # Calculate YTD expenses
+        total_expenses = db.session.query(
+            func.sum(JournalLine.debit)
+        ).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).join(
+            Account, Account.id == JournalLine.account_id
+        ).filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_date >= start_datetime,
+            JournalEntry.entry_date <= end_datetime,
+            JournalEntry.status == 'POSTED',
+            Account.account_type == 'EXPENSE'
+        ).scalar() or 0
+        
+        return jsonify({
+            'year': year,
+            'totalIncome': float(total_income),
+            'totalExpenses': float(total_expenses),
+            'netIncome': float(total_income - total_expenses)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting YTD stats: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
 
 @accounting_bp.route('/recent-entries', methods=['GET'])
 @token_required
@@ -446,6 +617,166 @@ def _get_income_statement(church_id, start_date_str, end_date_str):
     }), 200
 
 
+@accounting_bp.route('/financial-statements-with-budget', methods=['GET'])
+@token_required
+def get_financial_statements_with_budget():
+    """Get financial statements with budget variance analysis"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get date parameters
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        
+        if not start_date_str or not end_date_str:
+            return jsonify({'error': 'startDate and endDate are required'}), 400
+        
+        try:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        except:
+            return jsonify({'error': 'Invalid date format'}), 400
+        
+        year = start_date.year
+        
+        # Get actual income statement data
+        income_statement = _get_income_statement_data(church_id, start_date, end_date)
+        
+        # Get budget data
+        budget_data = _get_budget_data_for_period(church_id, year, start_date, end_date)
+        
+        # Calculate variances
+        revenue_variance = income_statement['revenue']['total'] - budget_data['revenue_budget']
+        expense_variance = income_statement['expenses']['total'] - budget_data['expense_budget']
+        net_variance = income_statement['net_income'] - (budget_data['revenue_budget'] - budget_data['expense_budget'])
+        
+        return jsonify({
+            'income_statement': income_statement,
+            'budget_comparison': {
+                'revenue': {
+                    'budget': round(budget_data['revenue_budget'], 2),
+                    'actual': round(income_statement['revenue']['total'], 2),
+                    'variance': round(revenue_variance, 2),
+                    'variance_percentage': round((revenue_variance / budget_data['revenue_budget'] * 100) if budget_data['revenue_budget'] > 0 else 0, 2),
+                    'favorable': revenue_variance > 0
+                },
+                'expenses': {
+                    'budget': round(budget_data['expense_budget'], 2),
+                    'actual': round(income_statement['expenses']['total'], 2),
+                    'variance': round(expense_variance, 2),
+                    'variance_percentage': round((expense_variance / budget_data['expense_budget'] * 100) if budget_data['expense_budget'] > 0 else 0, 2),
+                    'favorable': expense_variance < 0
+                },
+                'net': {
+                    'budget': round(budget_data['revenue_budget'] - budget_data['expense_budget'], 2),
+                    'actual': round(income_statement['net_income'], 2),
+                    'variance': round(net_variance, 2),
+                    'favorable': net_variance > 0
+                }
+            },
+            'period': {
+                'start': start_date.isoformat(),
+                'end': end_date.isoformat(),
+                'year': year
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting financial statements with budget: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+def _get_income_statement_data(church_id, start_date, end_date):
+    """Helper to get income statement data"""
+    revenue_accounts = Account.query.filter_by(
+        church_id=church_id, account_type='REVENUE', is_active=True
+    ).order_by(Account.account_code).all()
+    
+    revenue_data = []
+    total_revenue = 0
+    for acc in revenue_accounts:
+        balance = get_account_balance(acc.id, start_date, end_date)
+        if balance != 0:
+            revenue_data.append({
+                'id': acc.id,
+                'account_code': acc.account_code,
+                'name': acc.name,
+                'category': acc.category,
+                'amount': balance
+            })
+            total_revenue += balance
+    
+    expense_accounts = Account.query.filter_by(
+        church_id=church_id, account_type='EXPENSE', is_active=True
+    ).order_by(Account.account_code).all()
+    
+    expense_data = []
+    total_expense = 0
+    for acc in expense_accounts:
+        balance = get_account_balance(acc.id, start_date, end_date)
+        if balance != 0:
+            expense_data.append({
+                'id': acc.id,
+                'account_code': acc.account_code,
+                'name': acc.name,
+                'category': acc.category,
+                'amount': balance
+            })
+            total_expense += balance
+    
+    return {
+        'revenue': {
+            'items': revenue_data,
+            'total': total_revenue,
+            'categories': {}
+        },
+        'expenses': {
+            'items': expense_data,
+            'total': total_expense,
+            'categories': {}
+        },
+        'net_income': total_revenue - total_expense
+    }
+
+
+def _get_budget_data_for_period(church_id, year, start_date, end_date):
+    """Helper to get budget data for a period"""
+    try:
+        from app.models import Budget
+        
+        # Get approved budgets for the year
+        revenue_budgets = Budget.query.filter_by(
+            church_id=church_id,
+            fiscal_year=year,
+            budget_type='REVENUE',
+            status='APPROVED'
+        ).all()
+        
+        expense_budgets = Budget.query.filter_by(
+            church_id=church_id,
+            fiscal_year=year,
+            budget_type='EXPENSE',
+            status='APPROVED'
+        ).all()
+        
+        total_revenue_budget = sum(float(b.amount) for b in revenue_budgets)
+        total_expense_budget = sum(float(b.amount) for b in expense_budgets)
+        
+    except:
+        # Fallback: Use previous year's actuals with growth
+        prev_year_start = date(start_date.year - 1, start_date.month, start_date.day)
+        prev_year_end = date(end_date.year - 1, end_date.month, end_date.day)
+        
+        prev_income = _get_income_statement_data(church_id, prev_year_start, prev_year_end)
+        total_revenue_budget = prev_income['revenue']['total'] * 1.05  # 5% growth
+        total_expense_budget = prev_income['expenses']['total'] * 1.03  # 3% growth
+    
+    return {
+        'revenue_budget': total_revenue_budget,
+        'expense_budget': total_expense_budget
+    }
+
 def _get_balance_sheet(church_id, end_date_str):
     """Get balance sheet"""
     if not end_date_str:
@@ -671,6 +1002,284 @@ def get_trial_balance():
         return jsonify({'error': str(e)}), 500
 
 
+# Add after your existing imports
+from sqlalchemy import func, or_, and_
+from datetime import datetime, timedelta, date
+
+# ==================== BALANCE SHEET ENDPOINT ====================
+
+@accounting_bp.route('/balance-sheet', methods=['GET'])
+@token_required
+def get_balance_sheet_data():
+    """Get balance sheet data"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        as_at_str = request.args.get('asAt')
+        if not as_at_str:
+            as_at_str = datetime.utcnow().date().isoformat()
+        
+        try:
+            as_at = datetime.fromisoformat(as_at_str.replace('Z', '+00:00')).date()
+        except:
+            as_at = datetime.utcnow().date()
+        
+        # Get asset accounts
+        asset_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='ASSET', is_active=True
+        ).order_by(Account.account_code).all()
+        
+        assets = []
+        total_assets = 0
+        for acc in asset_accounts:
+            balance = get_account_balance(acc.id, None, as_at)
+            assets.append({
+                'id': acc.id,
+                'code': acc.account_code,
+                'name': acc.name,
+                'category': acc.category or 'Assets',
+                'amount': float(balance)
+            })
+            total_assets += balance
+        
+        # Get liability accounts
+        liability_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='LIABILITY', is_active=True
+        ).order_by(Account.account_code).all()
+        
+        liabilities = []
+        total_liabilities = 0
+        for acc in liability_accounts:
+            balance = get_account_balance(acc.id, None, as_at)
+            liabilities.append({
+                'id': acc.id,
+                'code': acc.account_code,
+                'name': acc.name,
+                'category': acc.category or 'Liabilities',
+                'amount': float(balance)
+            })
+            total_liabilities += balance
+        
+        # Get equity accounts
+        equity_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EQUITY', is_active=True
+        ).order_by(Account.account_code).all()
+        
+        equity = []
+        total_equity = 0
+        for acc in equity_accounts:
+            balance = get_account_balance(acc.id, None, as_at)
+            equity.append({
+                'id': acc.id,
+                'code': acc.account_code,
+                'name': acc.name,
+                'category': acc.category or 'Equity',
+                'amount': float(balance)
+            })
+            total_equity += balance
+        
+        return jsonify({
+            'assets': {
+                'items': assets,
+                'total': float(total_assets)
+            },
+            'liabilities': {
+                'items': liabilities,
+                'total': float(total_liabilities)
+            },
+            'equity': {
+                'items': equity,
+                'total': float(total_equity)
+            },
+            'asAt': as_at.isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting balance sheet: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== INCOME VS EXPENSES ENDPOINT ====================
+
+@accounting_bp.route('/income-vs-expenses', methods=['GET'])
+@token_required
+def get_income_vs_expenses():
+    """Get income vs expenses comparison for charts"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        # Get parameters
+        period = request.args.get('period', 'month')
+        start_date_str = request.args.get('startDate')
+        end_date_str = request.args.get('endDate')
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if start_date_str and end_date_str:
+            start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00')).date()
+        elif period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get revenue accounts
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        total_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_income += balance
+        
+        # Get expense accounts
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        total_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                total_expenses += balance
+        
+        # Calculate previous period for comparison
+        days_diff = (end_date - start_date).days
+        prev_end_date = start_date - timedelta(days=1)
+        prev_start_date = prev_end_date - timedelta(days=days_diff)
+        
+        prev_income = 0
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_income += balance
+        
+        prev_expenses = 0
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, prev_start_date, prev_end_date)
+            if balance > 0:
+                prev_expenses += balance
+        
+        income_change = ((total_income - prev_income) / prev_income * 100) if prev_income > 0 else 0
+        expense_change = ((total_expenses - prev_expenses) / prev_expenses * 100) if prev_expenses > 0 else 0
+        
+        # Generate monthly data for chart
+        monthly_data = []
+        current = start_date
+        while current <= end_date:
+            if current.month == 12:
+                month_end = date(current.year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(current.year, current.month + 1, 1) - timedelta(days=1)
+            month_end = min(month_end, end_date)
+            
+            month_income = 0
+            for acc in revenue_accounts:
+                balance = get_account_balance(acc.id, current, month_end)
+                if balance > 0:
+                    month_income += balance
+            
+            month_expenses = 0
+            for acc in expense_accounts:
+                balance = get_account_balance(acc.id, current, month_end)
+                if balance > 0:
+                    month_expenses += balance
+            
+            monthly_data.append({
+                'month': current.strftime('%b'),
+                'income': float(month_income),
+                'expenses': float(month_expenses),
+                'net': float(month_income - month_expenses)
+            })
+            
+            if current.month == 12:
+                current = date(current.year + 1, 1, 1)
+            else:
+                current = date(current.year, current.month + 1, 1)
+        
+        return jsonify({
+            'income': float(total_income),
+            'expenses': float(total_expenses),
+            'net': float(total_income - total_expenses),
+            'incomeChange': round(income_change, 1),
+            'expenseChange': round(expense_change, 1),
+            'data': monthly_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in income-vs-expenses endpoint: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== CATEGORY BREAKDOWN ENDPOINT ====================
+
+@accounting_bp.route('/category-breakdown', methods=['GET'])
+@token_required
+def get_category_breakdown_data():
+    """Get income and expense breakdown by category"""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        
+        period = request.args.get('period', 'month')
+        
+        # Set date range
+        end_date = datetime.utcnow().date()
+        if period == 'month':
+            start_date = end_date.replace(day=1)
+        elif period == 'quarter':
+            quarter = (end_date.month - 1) // 3
+            start_date = date(end_date.year, quarter * 3 + 1, 1)
+        elif period == 'year':
+            start_date = date(end_date.year, 1, 1)
+        else:
+            start_date = end_date - timedelta(days=30)
+        
+        # Get income by category
+        revenue_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='REVENUE', is_active=True
+        ).all()
+        
+        income_categories = []
+        for acc in revenue_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                income_categories.append({
+                    'name': acc.category or 'Other Income',
+                    'value': float(balance)
+                })
+        
+        # Get expenses by category
+        expense_accounts = Account.query.filter_by(
+            church_id=church_id, account_type='EXPENSE', is_active=True
+        ).all()
+        
+        expense_categories = []
+        for acc in expense_accounts:
+            balance = get_account_balance(acc.id, start_date, end_date)
+            if balance > 0:
+                expense_categories.append({
+                    'name': acc.category or 'Other Expenses',
+                    'value': float(balance)
+                })
+        
+        return jsonify({
+            'income': income_categories,
+            'expenses': expense_categories
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in category-breakdown endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
 # ==================== LEDGER ====================
 
 @accounting_bp.route('/ledger', methods=['GET'])
