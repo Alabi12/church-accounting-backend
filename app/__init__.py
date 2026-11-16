@@ -273,6 +273,7 @@ def create_app(config_name='development'):
         from app.routes.leave_routes import leave_bp
         from app.routes.tax_routes import tax_bp
         from app.routes.audit_routes import audit_bp
+        from app.routes.committee_routes import committee_bp
 
         
         app.register_blueprint(auth_bp, url_prefix='/api/auth')
@@ -296,6 +297,7 @@ def create_app(config_name='development'):
         app.register_blueprint(leave_bp, url_prefix='/api/leave')
         app.register_blueprint(tax_bp, url_prefix='/api/tax')
         app.register_blueprint(audit_bp, url_prefix='/api/audit')
+        app.register_blueprint(committee_bp, url_prefix='/api/committee')
 
         
         print("[STEP 14] Blueprints registered successfully")

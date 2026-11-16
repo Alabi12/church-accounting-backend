@@ -14,6 +14,8 @@ from app.models.deduction import DeductionType, EmployeeDeduction
 from app.models.role import Role, PermissionModel, UserRole
 from app.models.member import Member
 from app.models.setting import Setting
+from app.models.role_permission import RolePermission
+from app.models.reconciliation import ReconciliationRecord
 from app.models.approval import (
     ApprovalWorkflow, ApprovalWorkflowStep, 
     ApprovalRequest, Approval, ApprovalComment
@@ -30,6 +32,7 @@ Permission = PermissionEnum
 
 # Import relationships
 from app.models import relationships
+
 
 __all__ = [
     'User', 'Church', 'Account', 'Transaction', 

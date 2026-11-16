@@ -10,9 +10,9 @@ with app.app_context():
     
     if admin:
         # Reset password
-        admin.set_password('admin123')
+        admin.set_password('password123')
         db.session.commit()
-        print("✅ Admin password reset to: admin123")
+        print("✅ Admin password reset to: password123")
     else:
         # Create admin if doesn't exist
         admin = User(
@@ -24,7 +24,7 @@ with app.app_context():
             is_active=True,
             is_verified=True
         )
-        admin.set_password('admin123')
+        admin.set_password('password123')
         db.session.add(admin)
         db.session.commit()
-        print("✅ Admin user created with password: admin123")
+        print("✅ Admin user created with password: password123")

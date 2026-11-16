@@ -2669,3 +2669,694 @@ def test():
         'status': 'ok',
         'message': 'Accounting blueprint is working!'
     }), 200
+
+
+    # ==================== RECONCILIATION ENDPOINTS ====================
+# Add these at the end of accounting_routes.py, before the DEBUG ENDPOINTS section
+
+from sqlalchemy import func, or_, and_, case
+
+
+@accounting_bp.route('/reconciliation/accounts', methods=['GET'])
+@token_required
+def get_reconciliation_accounts():
+    """Get bank or petty cash accounts available for reconciliation."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        account_type = request.args.get('type', 'bank').lower()
+
+        # Bank accounts -> ASSET accounts with category='Bank' OR name containing 'bank'
+        # Petty cash -> ASSET accounts with category='Cash' OR name containing 'cash'
+        if account_type == 'bank':
+            category_filters = or_(
+                Account.category == 'Bank',
+                Account.name.ilike('%bank%'),
+                Account.account_code.like('1020%'),
+            )
+        else:
+            category_filters = or_(
+                Account.category == 'Cash',
+                Account.name.ilike('%petty%'),
+                Account.name.ilike('%cash%'),
+                Account.account_code.like('1010%'),
+            )
+
+        accounts = Account.query.filter(
+            Account.church_id == church_id,
+            Account.account_type == 'ASSET',
+            Account.is_active == True,
+            category_filters,
+        ).order_by(Account.account_code).all()
+
+        return jsonify({
+            'accounts': [
+                {
+                    'id': a.id,
+                    'name': a.name,
+                    'account_code': a.account_code,
+                    'category': a.category,
+                    'current_balance': float(a.current_balance or 0),
+                }
+                for a in accounts
+            ]
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error getting reconciliation accounts: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/data', methods=['GET'])
+@token_required
+def get_reconciliation_data():
+    """Get reconciliation data for an account as of a given date."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        account_id = request.args.get('accountId', type=int)
+        as_of_str = request.args.get('asOf')
+
+        if not account_id:
+            return jsonify({'error': 'accountId is required'}), 400
+
+        # Parse as_of safely
+        try:
+            as_of = (
+                datetime.fromisoformat(as_of_str.replace('Z', '+00:00')).date()
+                if as_of_str
+                else datetime.utcnow().date()
+            )
+        except (ValueError, TypeError, AttributeError):
+            as_of = datetime.utcnow().date()
+
+        end_dt = datetime.combine(as_of, datetime.max.time())
+
+        account = Account.query.filter_by(
+            id=account_id, church_id=church_id
+        ).first()
+
+        if not account:
+            return jsonify({'error': 'Account not found'}), 404
+
+        rows = db.session.query(JournalLine, JournalEntry).join(
+            JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+        ).filter(
+            JournalLine.account_id == account_id,
+            JournalEntry.church_id == church_id,
+            JournalEntry.status == 'POSTED',
+            JournalEntry.entry_date <= end_dt,
+        ).order_by(
+            JournalEntry.entry_date.asc(), JournalEntry.id.asc()
+        ).all()
+
+        transactions = []
+        for line, entry in rows:
+            debit = float(line.debit or 0)
+            credit = float(line.credit or 0)
+
+            # Derive check number from reference (JournalEntry has no check_number column)
+            ref = (entry.reference or '').strip()
+            check_number = None
+            if ref.upper().startswith(('CHK', 'CHECK', '#')):
+                stripped = ref.lstrip('#')
+                for prefix in ('CHK-', 'CHECK-', 'CHK', 'CHECK'):
+                    if stripped.upper().startswith(prefix):
+                        stripped = stripped[len(prefix):]
+                        break
+                check_number = stripped.strip() or None
+
+            if check_number:
+                ttype = 'check'
+            elif debit > 0:
+                ttype = 'deposit'
+            elif credit > 0:
+                ttype = 'withdrawal'
+            else:
+                ttype = 'other'
+
+            transactions.append({
+                'id': line.id,
+                'date': entry.entry_date.isoformat() if entry.entry_date else None,
+                'description': line.description or entry.description or 'Transaction',
+                'reference': ref or entry.entry_number,
+                'check_number': check_number,
+                'debit': debit,
+                'credit': credit,
+                'amount': debit - credit,
+                'type': ttype,
+                'reconciled': bool(getattr(line, 'reconciled', False)),
+                'cleared': bool(getattr(line, 'reconciled', False)),
+                'journal_entry_id': entry.id,
+            })
+
+        book_balance = sum(t['amount'] for t in transactions)
+        if account.current_balance is not None:
+            book_balance = float(account.current_balance)
+
+        recon_record = None
+        statement_balance = 0
+        opening_balance = 0
+        try:
+            from app.models import ReconciliationRecord
+
+            recon = ReconciliationRecord.query.filter_by(
+                account_id=account_id,
+                church_id=church_id,
+                reconciliation_date=as_of,
+            ).first()
+
+            if recon:
+                recon_record = {
+                    'id': recon.id,
+                    'status': getattr(recon, 'status', 'IN_PROGRESS') or 'IN_PROGRESS',
+                    'statement_balance': float(getattr(recon, 'statement_balance', 0) or 0),
+                    'opening_balance': float(getattr(recon, 'opening_balance', 0) or 0),
+                }
+                statement_balance = recon_record['statement_balance']
+                opening_balance = recon_record['opening_balance']
+        except Exception as recon_err:
+            logger.warning(
+                f"Could not load reconciliation record "
+                f"(account={account_id}, date={as_of}): {recon_err}"
+            )
+
+        return jsonify({
+            'account': {
+                'id': account.id,
+                'name': account.name,
+                'account_code': account.account_code,
+                'current_balance': float(account.current_balance or 0),
+            },
+            'book_balance': book_balance,
+            'statement_balance': statement_balance,
+            'opening_balance': opening_balance,
+            'transactions': transactions,
+            'adjustments': [],
+            'reconciliation': recon_record,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error getting reconciliation data: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+      
+
+@accounting_bp.route('/reconciliation/transaction/<int:line_id>/reconcile', methods=['POST'])
+@token_required
+def reconcile_transaction(line_id):
+    """Mark a journal line as reconciled."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        data = request.get_json() or {}
+        account_id = data.get('accountId')
+
+        line = JournalLine.query.get(line_id)
+        if not line:
+            return jsonify({'error': 'Transaction not found'}), 404
+
+        entry = JournalEntry.query.get(line.journal_entry_id)
+        if not entry or entry.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+
+        if account_id and line.account_id != int(account_id):
+            return jsonify({'error': 'Transaction does not belong to this account'}), 400
+
+        # Set reconciled flag (add this column to JournalLine if it doesn't exist)
+        if hasattr(line, 'reconciled'):
+            line.reconciled = True
+        if hasattr(line, 'reconciled_at'):
+            line.reconciled_at = datetime.utcnow()
+        if hasattr(line, 'reconciled_by'):
+            line.reconciled_by = current_user.id
+
+        db.session.commit()
+        return jsonify({'message': 'Transaction reconciled', 'id': line_id}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error reconciling transaction: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/transaction/<int:line_id>/unreconcile', methods=['POST'])
+@token_required
+def unreconcile_transaction(line_id):
+    """Mark a journal line as unreconciled."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+
+        line = JournalLine.query.get(line_id)
+        if not line:
+            return jsonify({'error': 'Transaction not found'}), 404
+
+        entry = JournalEntry.query.get(line.journal_entry_id)
+        if not entry or entry.church_id != church_id:
+            return jsonify({'error': 'Access denied'}), 403
+
+        if hasattr(line, 'reconciled'):
+            line.reconciled = False
+
+        db.session.commit()
+        return jsonify({'message': 'Transaction unreconciled', 'id': line_id}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unreconciling transaction: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/bulk-reconcile', methods=['POST'])
+@token_required
+def bulk_reconcile():
+    """Mark all given lines as reconciled at once."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        data = request.get_json() or {}
+        line_ids = data.get('transactionIds') or []
+
+        if not line_ids:
+            return jsonify({'error': 'transactionIds is required'}), 400
+
+        updated = 0
+        for lid in line_ids:
+            line = JournalLine.query.get(lid)
+            if not line:
+                continue
+            entry = JournalEntry.query.get(line.journal_entry_id)
+            if not entry or entry.church_id != church_id:
+                continue
+
+            if hasattr(line, 'reconciled'):
+                line.reconciled = True
+            if hasattr(line, 'reconciled_at'):
+                line.reconciled_at = datetime.utcnow()
+            if hasattr(line, 'reconciled_by'):
+                line.reconciled_by = current_user.id
+            updated += 1
+
+        db.session.commit()
+        return jsonify({'message': f'{updated} transactions reconciled', 'count': updated}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error bulk reconciling: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/adjustment', methods=['POST'])
+@token_required
+def create_reconciliation_adjustment():
+    """
+    Create an adjustment as a POSTED journal entry.
+    Body: { accountId, reconciliationDate, description, amount (signed), side: 'bank'|'book' }
+    """
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        data = request.get_json() or {}
+
+        account_id = data.get('accountId')
+        description = (data.get('description') or '').strip()
+        amount = float(data.get('amount', 0))
+        side = data.get('side', 'book')
+        recon_date_str = data.get('reconciliationDate')
+
+        if not account_id or not description or amount == 0:
+            return jsonify({'error': 'accountId, description, and non-zero amount are required'}), 400
+
+        try:
+            recon_date = datetime.fromisoformat(
+                (recon_date_str or datetime.utcnow().date().isoformat())
+                .replace('Z', '+00:00')
+            ).date()
+        except (ValueError, TypeError):
+            recon_date = datetime.utcnow().date()
+
+        account = Account.query.filter_by(id=account_id, church_id=church_id).first()
+        if not account:
+            return jsonify({'error': 'Account not found'}), 404
+
+        # Determine the offsetting account:
+        #   - book side adjustment -> hit a Misc Adjustment equity/expense account
+        #   - bank side adjustment -> hit a Misc Bank Adjustment expense/income account
+        adjustment_account_name = (
+            'Bank Reconciliation Adjustment' if side == 'bank'
+            else 'Book Reconciliation Adjustment'
+        )
+
+        adjustment_account = Account.query.filter_by(
+            church_id=church_id, name=adjustment_account_name
+        ).first()
+
+        if not adjustment_account:
+            # Create the offsetting account if it doesn't exist
+            adjustment_account = Account(
+                church_id=church_id,
+                account_code=f'ADJ-{side.upper()[:4]}',
+                name=adjustment_account_name,
+                account_type='EXPENSE' if amount < 0 else 'REVENUE',
+                category='Reconciliation Adjustments',
+                normal_balance='debit' if amount < 0 else 'credit',
+                is_active=True,
+                current_balance=0,
+            )
+            db.session.add(adjustment_account)
+            db.session.flush()
+
+        # Generate entry number
+        date_prefix = recon_date.strftime('%Y%m%d')
+        last_entry = JournalEntry.query.filter(
+            JournalEntry.church_id == church_id,
+            JournalEntry.entry_number.like(f'JE-{date_prefix}-%'),
+        ).order_by(JournalEntry.entry_number.desc()).first()
+
+        if last_entry:
+            try:
+                seq = int(last_entry.entry_number.split('-')[-1]) + 1
+            except (ValueError, IndexError):
+                seq = 1
+        else:
+            seq = 1
+
+        entry_number = f'JE-{date_prefix}-{seq:03d}'
+
+        journal_entry = JournalEntry(
+            church_id=church_id,
+            entry_number=entry_number,
+            entry_date=recon_date,
+            description=f'Reconciliation Adjustment: {description}',
+            reference=f'RECON-{side.upper()}',
+            status='POSTED',
+            created_by=current_user.id,
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(journal_entry)
+        db.session.flush()
+
+        # Double entry:
+        #   amount > 0 -> Debit target account, Credit adjustment account
+        #   amount < 0 -> Debit adjustment account, Credit target account
+        abs_amount = abs(amount)
+
+        if amount > 0:
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=account_id,
+                description=description,
+                debit=abs_amount,
+                credit=0,
+            ))
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=adjustment_account.id,
+                description=description,
+                debit=0,
+                credit=abs_amount,
+            ))
+        else:
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=adjustment_account.id,
+                description=description,
+                debit=abs_amount,
+                credit=0,
+            ))
+            db.session.add(JournalLine(
+                journal_entry_id=journal_entry.id,
+                account_id=account_id,
+                description=description,
+                debit=0,
+                credit=abs_amount,
+            ))
+
+        # Update cached balances
+        account.current_balance = float(account.current_balance or 0) + amount
+        adjustment_account.current_balance = (
+            float(adjustment_account.current_balance or 0) - amount
+        )
+
+        db.session.commit()
+
+        return jsonify({
+            'message': 'Adjustment recorded',
+            'adjustment': {
+                'id': journal_entry.id,
+                'journal_entry_id': journal_entry.id,
+                'entry_number': entry_number,
+                'description': description,
+                'amount': amount,
+                'side': side,
+                'date': recon_date.isoformat(),
+            }
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error creating adjustment: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/adjustment/<int:adjustment_id>', methods=['DELETE'])
+@token_required
+def delete_reconciliation_adjustment(adjustment_id):
+    """Reverse/delete an adjustment journal entry."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+
+        entry = JournalEntry.query.filter_by(
+            id=adjustment_id, church_id=church_id
+        ).first()
+
+        if not entry:
+            return jsonify({'error': 'Adjustment not found'}), 404
+
+        if entry.status == 'POSTED':
+            return jsonify({
+                'error': 'Cannot delete a posted adjustment. Create a reversing entry instead.'
+            }), 400
+
+        # Update balances before deletion
+        for line in entry.lines:
+            account = Account.query.get(line.account_id)
+            if account:
+                account.current_balance = (
+                    float(account.current_balance or 0)
+                    - float(line.debit or 0)
+                    + float(line.credit or 0)
+                )
+
+        db.session.delete(entry)
+        db.session.commit()
+
+        return jsonify({'message': 'Adjustment removed'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting adjustment: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/complete', methods=['POST'])
+@token_required
+def complete_reconciliation():
+    """Lock a reconciliation and record it in history."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        data = request.get_json() or {}
+
+        account_id = data.get('accountId')
+        recon_date_str = data.get('reconciliationDate')
+        opening_balance = float(data.get('openingBalance') or 0)
+        statement_balance = float(data.get('statementBalance') or 0)
+        book_balance = float(data.get('bookBalance') or 0)
+        reconciled_bank = float(data.get('reconciledBankBalance') or 0)
+        reconciled_book = float(data.get('reconciledBookBalance') or 0)
+        difference = float(data.get('difference') or 0)
+        reconciled_ids = data.get('reconciledTransactionIds') or []
+
+        if not account_id or not recon_date_str:
+            return jsonify({'error': 'accountId and reconciliationDate are required'}), 400
+
+        if abs(difference) >= 0.01:
+            return jsonify({
+                'error': f'Cannot complete: out of balance by {difference}'
+            }), 400
+
+        try:
+            recon_date = datetime.fromisoformat(
+                recon_date_str.replace('Z', '+00:00')
+            ).date()
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid date format'}), 400
+
+        account = Account.query.filter_by(id=account_id, church_id=church_id).first()
+        if not account:
+            return jsonify({'error': 'Account not found'}), 404
+
+        # Persist reconciliation history (creates a ReconciliationRecord if model exists)
+        try:
+            from app.models import ReconciliationRecord
+
+            existing = ReconciliationRecord.query.filter_by(
+                account_id=account_id,
+                church_id=church_id,
+                reconciliation_date=recon_date,
+            ).first()
+
+            if existing:
+                existing.status = 'COMPLETED'
+                existing.opening_balance = opening_balance
+                existing.statement_balance = statement_balance
+                existing.book_balance = book_balance
+                existing.reconciled_bank_balance = reconciled_bank
+                existing.reconciled_book_balance = reconciled_book
+                existing.difference = difference
+                existing.completed_by = current_user.id
+                existing.completed_at = datetime.utcnow()
+                record = existing
+            else:
+                record = ReconciliationRecord(
+                    church_id=church_id,
+                    account_id=account_id,
+                    reconciliation_date=recon_date,
+                    opening_balance=opening_balance,
+                    statement_balance=statement_balance,
+                    book_balance=book_balance,
+                    reconciled_bank_balance=reconciled_bank,
+                    reconciled_book_balance=reconciled_book,
+                    difference=difference,
+                    status='COMPLETED',
+                    completed_by=current_user.id,
+                    completed_at=datetime.utcnow(),
+                )
+                db.session.add(record)
+
+            db.session.flush()
+            record_id = record.id
+        except ImportError:
+            # ReconciliationRecord model not yet created — just log to audit
+            record_id = None
+
+        # Ensure all reconciled_ids are actually marked
+        for lid in reconciled_ids:
+            line = JournalLine.query.get(lid)
+            if line and hasattr(line, 'reconciled'):
+                line.reconciled = True
+
+        db.session.commit()
+
+        return jsonify({
+            'message': 'Reconciliation completed',
+            'reconciliation_id': record_id,
+            'status': 'COMPLETED',
+            'statement_balance': statement_balance,
+            'book_balance': reconciled_book,
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error completing reconciliation: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/history', methods=['GET'])
+@token_required
+def get_reconciliation_history():
+    """Get reconciliation history for an account."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        account_id = request.args.get('accountId', type=int)
+
+        if not account_id:
+            return jsonify({'error': 'accountId is required'}), 400
+
+        try:
+            from app.models import ReconciliationRecord
+
+            records = ReconciliationRecord.query.filter_by(
+                account_id=account_id,
+                church_id=church_id,
+            ).order_by(
+                ReconciliationRecord.reconciliation_date.desc()
+            ).all()
+
+            history = []
+            for r in records:
+                history.append({
+                    'id': r.id,
+                    'date': r.reconciliation_date.isoformat() if r.reconciliation_date else None,
+                    'status': r.status,
+                    'opening_balance': float(r.opening_balance or 0),
+                    'closing_balance': float(r.reconciled_book_balance or r.book_balance or 0),
+                    'statement_balance': float(r.statement_balance or 0),
+                    'difference': float(r.difference or 0),
+                    'transactionsCount': 0,
+                    'completed_at': r.completed_at.isoformat() if r.completed_at else None,
+                })
+
+            return jsonify({'history': history}), 200
+        except ImportError:
+            return jsonify({'history': []}), 200
+
+    except Exception as e:
+        logger.error(f"Error getting reconciliation history: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@accounting_bp.route('/reconciliation/unlock', methods=['POST'])
+@token_required
+def unlock_reconciliation():
+    """Unlock a completed reconciliation (requires reason)."""
+    try:
+        church_id = ensure_user_church(g.current_user)
+        current_user = g.current_user
+        data = request.get_json() or {}
+
+        account_id = data.get('accountId')
+        recon_date_str = data.get('reconciliationDate')
+        reason = (data.get('reason') or '').strip()
+
+        if not account_id or not recon_date_str or not reason:
+            return jsonify({
+                'error': 'accountId, reconciliationDate, and reason are required'
+            }), 400
+
+        try:
+            recon_date = datetime.fromisoformat(
+                recon_date_str.replace('Z', '+00:00')
+            ).date()
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid date format'}), 400
+
+        try:
+            from app.models import ReconciliationRecord
+
+            record = ReconciliationRecord.query.filter_by(
+                account_id=account_id,
+                church_id=church_id,
+                reconciliation_date=recon_date,
+            ).first()
+
+            if not record:
+                return jsonify({'error': 'Reconciliation record not found'}), 404
+
+            record.status = 'IN_PROGRESS'
+            record.unlocked_by = current_user.id
+            record.unlocked_at = datetime.utcnow()
+            record.unlock_reason = reason
+
+            db.session.commit()
+            return jsonify({'message': 'Reconciliation unlocked'}), 200
+        except ImportError:
+            return jsonify({'error': 'ReconciliationRecord model not defined'}), 500
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error unlocking reconciliation: {str(e)}")
+        return jsonify({'error': str(e)}), 500
